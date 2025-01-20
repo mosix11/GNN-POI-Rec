@@ -1,20 +1,108 @@
 import torch
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+
+from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
+
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
 from torch_geometric.typing import SparseTensor
 
 from pathlib import Path
 
-from ..utils import misc_utils
+
 import shutil
 from datetime import datetime, timedelta
 import geohash2 as geohash
 from typing import Union
-from collections import Counter
+from functools import partial
+import random
 
-from scipy.sparse import csr_matrix
+from ..utils import misc_utils
+
+
+class UserTrajectoryDataset(Dataset):
+    
+    def __init__(self,
+                 trajectories,
+                 ):
+        super().__init__()
+        
+        self.trajectories = trajectories
+        
+        
+    def __len__(self):
+        return self.trajectories.shape[0]
+    
+    def __getitem__(self, idx):
+        traj = self.trajectories.iloc[idx]
+        item = [
+            torch.tensor(traj['User ID']),
+            torch.tensor(traj['Venue ID']),
+            torch.tensor(traj['Venue Category ID']),
+            torch.tensor(traj['Geohash ID']),
+            torch.tensor(traj['Time Slot']),
+            torch.tensor(traj['Unix Timestamp'])
+        ]
+        return item
+    
+    
+    @staticmethod
+    def custom_collate(batch, max_seq_length: int, sampling_method: str, train:bool=True):
+        users, pois, pois_cat, gh, ts, ut = zip(*batch)
+
+        # Helper function to process each sequence based on the sampling method
+        def process_sequence(seq):
+            L = len(seq)
+            if L > max_seq_length:
+                if sampling_method == 'window':
+                    # Sample a continuous interval of length max_seq_length
+                    start_idx = random.randint(0, L - max_seq_length)
+                    seq = seq[start_idx:start_idx + max_seq_length]
+                elif sampling_method == 'random':
+                    # Sample max_seq_length indices randomly
+                    indices = sorted(random.sample(range(L), max_seq_length))
+                    seq = [seq[i] for i in indices]
+                    
+            if not isinstance(seq, torch.Tensor):
+                seq = torch.tensor(seq)
+            return seq, len(seq)
+
+        processed_pois = [process_sequence(seq) for seq in pois]
+        processed_pois_cat = [process_sequence(seq) for seq in pois_cat]
+        processed_gh = [process_sequence(seq) for seq in gh]
+        processed_ts = [process_sequence(seq) for seq in ts]
+        processed_ut = [process_sequence(seq) for seq in ut]
+
+        pois, pois_lens = zip(*processed_pois)
+        pois_cat, pois_cat_lens = zip(*processed_pois_cat)
+        gh, gh_lens = zip(*processed_gh)
+        ts, ts_lens = zip(*processed_ts)
+        ut, ut_lens = zip(*processed_ut)
+
+        # Pad sequences to max_seq_length
+        pois = pad_sequence(pois, batch_first=True)
+        pois_cat = pad_sequence(pois_cat, batch_first=True)
+        gh = pad_sequence(gh, batch_first=True)
+        ts = pad_sequence(ts, batch_first=True)
+        ut = pad_sequence(ut, batch_first=True)
+
+        users = torch.tensor(users)
+
+        orig_lens = torch.tensor(pois_lens)
+
+        # Prepare x and y for training with teacher forcing
+        if train:
+            x = (users, pois[:, :-1], pois_cat[:, :-1], gh[:, :-1], ts[:, :-1], ut[:, :-1])
+            y = (users, pois[:, 1:], pois_cat[:, 1:], gh[:, 1:], ts[:, 1:], ut[:, 1:])
+            return x, y, orig_lens
+        else:
+            # return users, pois, pois_cat, gh, ts, ut
+            return users, pois
+            
+        
 
 
 class FoursquareNYC(LightningDataModule):
@@ -26,6 +114,8 @@ class FoursquareNYC(LightningDataModule):
                  venue_checkin_tsh:int = (10, np.inf),
                  num_test_checkins:int = 6,
                  geohash_precision:list = [6],
+                 max_traj_length:list = 64,
+                 traj_sampling_method:str = 'window',
                  temporal_graph_jaccard_mult_set:bool = True,
                  temporal_graph_jaccard_sim_tsh:float = 0.9,
                  spatial_graph_self_loop:bool = True,
@@ -59,6 +149,9 @@ class FoursquareNYC(LightningDataModule):
         
         self.geohash_precision = geohash_precision
         
+        self.max_traj_length = max_traj_length
+        self.traj_sampling_method = traj_sampling_method
+        
         self.temporal_graph_jaccard_mult_set = temporal_graph_jaccard_mult_set
         self.temporal_graph_jaccard_sim_tsh = temporal_graph_jaccard_sim_tsh
         self.spatial_graph_self_loop = spatial_graph_self_loop
@@ -75,29 +168,33 @@ class FoursquareNYC(LightningDataModule):
         
         self._form_spatial_graph()
         self._form_temporal_graph()
-        pass
+        
+
 
     def setup(self, stage: str = None):
         # Split the dataset into train/val/test and assign to self variables
         if stage == 'fit' or stage is None:
-            self.train_dataset = ...
-            self.val_dataset = ...
+            self.train_dataset = UserTrajectoryDataset(self.user_train_trajectories)
+            self.val_dataset = UserTrajectoryDataset(self.user_test_trajectories)
         if stage == 'test' or stage is None:
-            self.test_dataset = ...
+            self.test_dataset = UserTrajectoryDataset(self.user_test_trajectories)
         if stage == 'predict' or stage is None:
             self.predict_dataset = ...
 
-    # def train_dataloader(self):
-    #     return DataLoader(self.train_dataset, batch_size=self.batch_size)
+    def train_dataloader(self):
+        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=self.max_traj_length, sampling_method=self.traj_sampling_method)
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True, num_workers=self.num_workers)
 
-    # def val_dataloader(self):
-    #     return DataLoader(self.val_dataset, batch_size=self.batch_size)
+    def val_dataloader(self):
+        max_length = self.num_test_checkins
+        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=max_length, sampling_method=self.traj_sampling_method, train=False)
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True, num_workers=self.num_workers)
 
-    # def test_dataloader(self):
-    #     return DataLoader(self.test_dataset, batch_size=self.batch_size)
+    def test_dataloader(self):
+        max_length = self.num_test_checkins
+        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=max_length, sampling_method=self.traj_sampling_method, train=False)
+        return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn,pin_memory=True, num_workers=self.num_workers)
 
-    # def predict_dataloader(self):
-    #     return DataLoader(self.predict_dataset, batch_size=self.batch_size)
     
     
     def _form_spatial_graph(self):
@@ -452,3 +549,12 @@ class FoursquareNYC(LightningDataModule):
         row, col = np.where(mat)  # Find indices of non-zero elements
         sparse_tensor = SparseTensor(row=torch.tensor(row), col=torch.tensor(col), value=torch.tensor(mat[row, col]))
         return sparse_tensor
+    
+    
+    def plot_distribution(self, data, x_label='Value', y_label='Frequency'):
+        plt.figure(figsize=(8, 5))
+        plt.hist(data, bins='auto', edgecolor='black', alpha=0.7)
+        plt.xlabel(x_label)
+        plt.ylabel(y_label)
+        plt.title('Distribution Plot')
+        plt.show()
