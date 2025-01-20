@@ -26,32 +26,48 @@ from ..utils import misc_utils
 class UserTrajectoryDataset(Dataset):
     
     def __init__(self,
-                 trajectories,
+                 train_trajectories,
+                 test_trajectories,
                  ):
         super().__init__()
         
-        self.trajectories = trajectories
+        assert train_trajectories.shape[0] == test_trajectories.shape[0], 'For each traning user trajectory there must be one test trajectory.'
+        self.train_trajectories = train_trajectories
+        self.test_trajectories = test_trajectories
         
         
     def __len__(self):
-        return self.trajectories.shape[0]
+        return self.train_trajectories.shape[0]
     
     def __getitem__(self, idx):
-        traj = self.trajectories.iloc[idx]
-        item = [
-            torch.tensor(traj['User ID']),
-            torch.tensor(traj['Venue ID']),
-            torch.tensor(traj['Venue Category ID']),
-            torch.tensor(traj['Geohash ID']),
-            torch.tensor(traj['Time Slot']),
-            torch.tensor(traj['Unix Timestamp'])
+        train_traj = self.train_trajectories.iloc[idx]
+        train_items = [
+            torch.tensor(train_traj['User ID']),
+            torch.tensor(train_traj['Venue ID']),
+            torch.tensor(train_traj['Venue Category ID']),
+            torch.tensor(train_traj['Geohash ID']),
+            torch.tensor(train_traj['Time Slot']),
+            torch.tensor(train_traj['Unix Timestamp'])
         ]
-        return item
+        test_traj = self.test_trajectories.iloc[idx]
+        test_items = [
+            torch.tensor(test_traj['User ID']),
+            torch.tensor(test_traj['Venue ID']),
+            torch.tensor(test_traj['Venue Category ID']),
+            torch.tensor(test_traj['Geohash ID']),
+            torch.tensor(test_traj['Time Slot']),
+            torch.tensor(test_traj['Unix Timestamp'])
+        ]
+        return train_items, test_items
     
     
     @staticmethod
     def custom_collate(batch, max_seq_length: int, sampling_method: str, train:bool=True):
-        users, pois, pois_cat, gh, ts, ut = zip(*batch)
+        train_batch, test_batch = zip(*batch)
+        # print(type(train_batch), type(test_batch))
+        users, pois, pois_cat, gh, ts, ut = zip(*train_batch)
+        
+        if not train: max_seq_length = np.max([len(item) for item in pois])
 
         # Helper function to process each sequence based on the sampling method
         def process_sequence(seq):
@@ -83,24 +99,27 @@ class UserTrajectoryDataset(Dataset):
         ut, ut_lens = zip(*processed_ut)
 
         # Pad sequences to max_seq_length
-        pois = pad_sequence(pois, batch_first=True)
-        pois_cat = pad_sequence(pois_cat, batch_first=True)
-        gh = pad_sequence(gh, batch_first=True)
-        ts = pad_sequence(ts, batch_first=True)
-        ut = pad_sequence(ut, batch_first=True)
+        pois = pad_sequence(pois, batch_first=True, padding_value=0)
+        pois_cat = pad_sequence(pois_cat, batch_first=True, padding_value=0)
+        gh = pad_sequence(gh, batch_first=True, padding_value=0)
+        ts = pad_sequence(ts, batch_first=True, padding_value=0)
+        ut = pad_sequence(ut, batch_first=True, padding_value=0)
 
         users = torch.tensor(users)
-
-        orig_lens = torch.tensor(pois_lens)
+        
 
         # Prepare x and y for training with teacher forcing
         if train:
+            orig_lens = torch.tensor(pois_lens) - 1 # TODO check the correctness
             x = (users, pois[:, :-1], pois_cat[:, :-1], gh[:, :-1], ts[:, :-1], ut[:, :-1])
-            y = (users, pois[:, 1:], pois_cat[:, 1:], gh[:, 1:], ts[:, 1:], ut[:, 1:])
+            y = (users, pois[:, 1:], pois_cat[:, 1:], gh[:, 1:])
             return x, y, orig_lens
         else:
+            orig_lens = torch.tensor(pois_lens)
+            x = (users, pois, pois_cat, gh, ts, ut)
+            y = zip(*test_batch)
             # return users, pois, pois_cat, gh, ts, ut
-            return users, pois
+            return x, y, orig_lens
             
         
 
@@ -169,17 +188,19 @@ class FoursquareNYC(LightningDataModule):
         self._form_spatial_graph()
         self._form_temporal_graph()
         
+        
 
 
     def setup(self, stage: str = None):
         # Split the dataset into train/val/test and assign to self variables
+        self.dataset = UserTrajectoryDataset(self.user_train_trajectories, self.user_test_trajectories)
         if stage == 'fit' or stage is None:
-            self.train_dataset = UserTrajectoryDataset(self.user_train_trajectories)
-            self.val_dataset = UserTrajectoryDataset(self.user_test_trajectories)
+            self.train_dataset = self.dataset
+            self.val_dataset = self.dataset
         if stage == 'test' or stage is None:
-            self.test_dataset = UserTrajectoryDataset(self.user_test_trajectories)
-        if stage == 'predict' or stage is None:
-            self.predict_dataset = ...
+            self.test_dataset = self.dataset
+        # if stage == 'predict' or stage is None:
+        #     self.predict_dataset = ...
 
     def train_dataloader(self):
         collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=self.max_traj_length, sampling_method=self.traj_sampling_method)
