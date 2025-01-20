@@ -15,12 +15,14 @@ class AccuracyK(nn.Module):
         super().__init__()
         self.k = k
 
-    def forward(
-        self, logits: torch.Tensor, targets: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         if len(targets.shape) == 2:
             targets.squeeze(1)
         predicted=logits.softmax(dim=-1)
-        top_k=predicted.topk(self.k, dim=-1)[1]
-        correct=(top_k==targets.unsqueeze(-1)).any(dim=-1).float()
-        return correct.mean()
+        
+        # Get the indices of the top-K predictions
+        _, top_k=predicted.topk(self.k)
+        top_k += 1 # the true labels start from 1
+        hits = top_k.eq(targets.unsqueeze(1)).any(dim=-1)
+        acc_at_k = hits.float().mean()
+        return acc_at_k
