@@ -17,7 +17,7 @@ class TrajLSTM(pl.LightningModule):
                  hidden_dim:int = 1024,
                  num_layers:int = 1,
                  lstm_dropout:float = 0.5,
-                 emb_dropout:float = 0.9,
+                 emb_dropout:float = 0.5,
                  
                  optim_lr:float = 1e-4,
                  optim_type:str = 'adamw'

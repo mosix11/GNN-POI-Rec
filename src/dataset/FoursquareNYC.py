@@ -26,14 +26,17 @@ from ..utils import misc_utils
 class UserTrajectoryDataset(Dataset):
     
     def __init__(self,
-                 train_trajectories,
-                 test_trajectories,
-                 ):
+                 train_trajectories:pd.DataFrame,
+                 test_trajectories:pd.DataFrame,
+                 ) -> None:
         super().__init__()
         
         assert train_trajectories.shape[0] == test_trajectories.shape[0], 'For each traning user trajectory there must be one test trajectory.'
+        train_trajectories = train_trajectories.drop(columns=['Local Time'])
+        test_trajectories = test_trajectories.drop(columns=['Local Time'])
         self.train_trajectories = train_trajectories
         self.test_trajectories = test_trajectories
+        self.columns = train_trajectories.columns.tolist()
         
         
     def __len__(self):
@@ -41,32 +44,29 @@ class UserTrajectoryDataset(Dataset):
     
     def __getitem__(self, idx):
         train_traj = self.train_trajectories.iloc[idx]
-        train_items = [
-            torch.tensor(train_traj['User ID']),
-            torch.tensor(train_traj['Venue ID']),
-            torch.tensor(train_traj['Venue Category ID']),
-            torch.tensor(train_traj['Geohash ID']),
-            torch.tensor(train_traj['Time Slot']),
-            torch.tensor(train_traj['Unix Timestamp'])
-        ]
+        train_items = [torch.tensor(train_traj[col]) for col in self.columns]
         test_traj = self.test_trajectories.iloc[idx]
-        test_items = [
-            torch.tensor(test_traj['User ID']),
-            torch.tensor(test_traj['Venue ID']),
-            torch.tensor(test_traj['Venue Category ID']),
-            torch.tensor(test_traj['Geohash ID']),
-            torch.tensor(test_traj['Time Slot']),
-            torch.tensor(test_traj['Unix Timestamp'])
-        ]
+        test_items = [torch.tensor(test_traj[col]) for col in self.columns]
         return train_items, test_items
     
     
     @staticmethod
-    def custom_collate(batch, max_seq_length: int, sampling_method: str, train:bool=True):
+    def custom_collate(batch, max_seq_length: int, sampling_method: str, geohash_precision:list, train:bool=True):
         train_batch, test_batch = zip(*batch)
-        # print(type(train_batch), type(test_batch))
-        users, pois, pois_cat, gh, ts, ut = zip(*train_batch)
         
+        if len(geohash_precision) == 1:
+            users, pois, pois_cat, gh1, ts, ut = zip(*train_batch)
+            gh2, gh3 = None, None
+        elif len(geohash_precision) == 2:
+            users, pois, pois_cat, gh1, gh2, ts, ut = zip(*train_batch)
+            gh3 = None
+        elif len(geohash_precision) == 3:
+            users, pois, pois_cat, gh1, gh2, gh3, ts, ut = zip(*train_batch)
+
+        
+        # In the test phase we pad all sequences in the batch to the longest
+        # sequence length in the batch since we don't want to remove any
+        # information.
         if not train: max_seq_length = np.max([len(item) for item in pois])
 
         # Helper function to process each sequence based on the sampling method
@@ -88,37 +88,49 @@ class UserTrajectoryDataset(Dataset):
 
         processed_pois = [process_sequence(seq) for seq in pois]
         processed_pois_cat = [process_sequence(seq) for seq in pois_cat]
-        processed_gh = [process_sequence(seq) for seq in gh]
+        processed_gh1 = [process_sequence(seq) for seq in gh1]
+        if gh2: processed_gh2 = [process_sequence(seq) for seq in gh2]
+        if gh3: processed_gh3 = [process_sequence(seq) for seq in gh3]
         processed_ts = [process_sequence(seq) for seq in ts]
         processed_ut = [process_sequence(seq) for seq in ut]
+        
+        
 
         pois, pois_lens = zip(*processed_pois)
-        pois_cat, pois_cat_lens = zip(*processed_pois_cat)
-        gh, gh_lens = zip(*processed_gh)
-        ts, ts_lens = zip(*processed_ts)
-        ut, ut_lens = zip(*processed_ut)
+        pois_cat, _ = zip(*processed_pois_cat)
+        gh1, _ = zip(*processed_gh1)
+        if gh2: gh2, _ = zip(*processed_gh2)
+        if gh3: gh3, _ = zip(*processed_gh3)
+        ts, _ = zip(*processed_ts)
+        ut, _ = zip(*processed_ut)
+        
         
 
         # Pad sequences to max_seq_length
         pois = pad_sequence(pois, batch_first=True, padding_value=0)
         pois_cat = pad_sequence(pois_cat, batch_first=True, padding_value=0)
-        gh = pad_sequence(gh, batch_first=True, padding_value=0)
+        gh1 = pad_sequence(gh1, batch_first=True, padding_value=0)
+        if gh2: gh2 = pad_sequence(gh2, batch_first=True, padding_value=0)
+        if gh3: gh3 = pad_sequence(gh3, batch_first=True, padding_value=0)
         ts = pad_sequence(ts, batch_first=True, padding_value=0)
         ut = pad_sequence(ut, batch_first=True, padding_value=0)
-
-        users = torch.tensor(users)
         
+        users = torch.tensor(users)
 
         # Prepare x and y for training with teacher forcing
+        ghs = list(x for x in [gh1, gh2, gh3] if x is not None)
+
         if train:
             orig_lens = torch.tensor(pois_lens) - 1 # TODO check the correctness
-            x = (users, pois[:, :-1], pois_cat[:, :-1], gh[:, :-1], ts[:, :-1], ut[:, :-1])
-            y = (users, pois[:, 1:], pois_cat[:, 1:], gh[:, 1:])
+            # x = (users, pois[:, :-1], pois_cat[:, :-1], gh1[:, :-1], ts[:, :-1], ut[:, :-1])
+            # y = (users, pois[:, 1:], pois_cat[:, 1:], gh1[:, 1:])
+            x = (users, pois[:, :-1], pois_cat[:, :-1], *[gh_[:, :-1] for gh_ in ghs], ts[:, :-1], ut[:, :-1])
+            y = (users, pois[:, 1:], pois_cat[:, 1:], *[gh_[:, 1:] for gh_ in ghs])
             return x, y, orig_lens
         else:
             orig_lens = torch.tensor(pois_lens)
-            x = (users, pois, pois_cat, gh, ts, ut)
-            t_users, t_pois, t_pois_cat, t_gh, t_ts, t_ut = zip(*test_batch)
+            x = (users, pois, pois_cat, *ghs, ts, ut)
+            t_users, t_pois, t_pois_cat, t_gh, _, _, t_ts, t_ut = zip(*test_batch)
             y = (torch.tensor(t_users), torch.stack(t_pois))
             return x, y, orig_lens
             
@@ -133,17 +145,19 @@ class FoursquareNYC(LightningDataModule):
                  user_checkin_tsh:int = (20, np.inf),
                  venue_checkin_tsh:int = (10, np.inf),
                  num_test_checkins:int = 6,
-                 geohash_precision:list = [6],
+                 geohash_precision:list = [5, 6, 7],
                  max_traj_length:list = 64,
                  traj_sampling_method:str = 'window',
                  temporal_graph_jaccard_mult_set:bool = True,
                  temporal_graph_jaccard_sim_tsh:float = 0.9,
                  spatial_graph_self_loop:bool = True,
+                 spatial_graph_geohash_precision:int = 6,
                  temporal_graph_self_loop:bool = True,
                  seed:int = 11) -> None:
         
         super().__init__()
         
+        assert spatial_graph_geohash_precision in geohash_precision, "The precision of Geohash used to form the spatial graph must be present in the `geohash_precision` list."
 
         self.data_dir = data_dir
         self.data_dir.mkdir(exist_ok=True)
@@ -175,6 +189,7 @@ class FoursquareNYC(LightningDataModule):
         self.temporal_graph_jaccard_mult_set = temporal_graph_jaccard_mult_set
         self.temporal_graph_jaccard_sim_tsh = temporal_graph_jaccard_sim_tsh
         self.spatial_graph_self_loop = spatial_graph_self_loop
+        self.spatial_graph_geohash_precision = spatial_graph_geohash_precision
         self.temporal_graph_self_loop = temporal_graph_self_loop
         
         self._download_dataset()
@@ -203,23 +218,34 @@ class FoursquareNYC(LightningDataModule):
         #     self.predict_dataset = ...
 
     def train_dataloader(self):
-        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=self.max_traj_length, sampling_method=self.traj_sampling_method)
+        collate_fn = partial(UserTrajectoryDataset.custom_collate,
+                             max_seq_length=self.max_traj_length,
+                             sampling_method=self.traj_sampling_method,
+                             geohash_precision=self.geohash_precision)
         return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True, num_workers=self.num_workers)
 
     def val_dataloader(self):
         max_length = self.num_test_checkins
-        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=max_length, sampling_method=self.traj_sampling_method, train=False)
+        collate_fn = partial(UserTrajectoryDataset.custom_collate,
+                             max_seq_length=max_length,
+                             sampling_method=self.traj_sampling_method,
+                             geohash_precision=self.geohash_precision,
+                             train=False)
         return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True, num_workers=self.num_workers)
 
     def test_dataloader(self):
         max_length = self.num_test_checkins
-        collate_fn = partial(UserTrajectoryDataset.custom_collate, max_seq_length=max_length, sampling_method=self.traj_sampling_method, train=False)
+        collate_fn = partial(UserTrajectoryDataset.custom_collate,
+                             max_seq_length=max_length,
+                             sampling_method=self.traj_sampling_method,
+                             geohash_precision=self.geohash_precision,
+                             train=False)
         return DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False, collate_fn=collate_fn,pin_memory=True, num_workers=self.num_workers)
 
     
     
     def _form_spatial_graph(self):
-        geohash_vec = np.array(self.poi_trajectories['Geohash ID'])
+        geohash_vec = np.array(self.poi_trajectories[f"Geohash P{self.spatial_graph_geohash_precision} ID"])
         
         adj_mat = (geohash_vec[:, None] == geohash_vec).astype(int)
         if not self.spatial_graph_self_loop: np.fill_diagonal(adj_mat, 0)  # Remove self-loops
@@ -279,6 +305,7 @@ class FoursquareNYC(LightningDataModule):
         
         df_flt = self._reassign_IDs(df_flt)
         
+
         self.STATS = {
             'num_user': df_flt['User ID'].nunique(),
             'num_pois': df_flt['Venue ID'].nunique(),
@@ -288,6 +315,11 @@ class FoursquareNYC(LightningDataModule):
         
         df_flt = self._process_time(df_flt)
         df_flt = self._process_location(df_flt)
+        
+        gh_id_keys = [f"Geohash P{prc} ID" for prc in self.geohash_precision]
+        stats_gh_keys = [f"num_gh_P{prc}" for prc in self.geohash_precision]
+        
+        self.STATS.update({**{key: val for key, val in zip(stats_gh_keys, [df_flt[gh_key].nunique() for gh_key in gh_id_keys])},})
         
         # user_trajectories, poi_trajectories = self._from_trajectories(df_flt)
         user_train_trajectories, user_test_trajectories, poi_trajectories = self._from_trajectories_with_split(df_flt, self.num_test_checkins)
@@ -333,6 +365,8 @@ class FoursquareNYC(LightningDataModule):
         # Store training data for calculating POI trajectories later
         train_checkins = []
 
+        geohash_id_keys = [f"Geohash P{precision} ID" for precision in self.geohash_precision]
+        
         for user_id, user_data in df.groupby("User ID", sort=False):
             user_data = user_data.sort_values(by="Unix Timestamp")  # Ensure temporal ordering
             train_data = user_data.iloc[:-num_test_checkins] if len(user_data) > num_test_checkins else user_data.iloc[0:0]
@@ -340,12 +374,14 @@ class FoursquareNYC(LightningDataModule):
 
             if not train_data.empty:
                 train_checkins.append(train_data)  # Collect for POI trajectory calculation
+                geohash_id_values = [train_data[id_key].tolist() for id_key in geohash_id_keys]
+                geohash_key_values = {key: value for key, value in zip(geohash_id_keys, geohash_id_values)}
                 user_train_trajectories.append(
                     {
                         "User ID": user_id,
                         "Venue ID": train_data["Venue ID"].tolist(),
                         "Venue Category ID": train_data["Venue Category ID"].tolist(),
-                        "Geohash ID": train_data["Geohash ID"].tolist(),
+                        **geohash_key_values,
                         "Local Time": train_data["Local Time"].tolist(),
                         "Time Slot": train_data["Time Slot"].tolist(),
                         "Unix Timestamp": train_data["Unix Timestamp"].tolist(),
@@ -353,12 +389,14 @@ class FoursquareNYC(LightningDataModule):
                 )
 
             if not test_data.empty:
+                geohash_id_values = [train_data[id_key].tolist() for id_key in geohash_id_keys]
+                geohash_key_values = {key: value for key, value in zip(geohash_id_keys, geohash_id_values)}
                 user_test_trajectories.append(
                     {
                         "User ID": user_id,
                         "Venue ID": test_data["Venue ID"].tolist(),
                         "Venue Category ID": test_data["Venue Category ID"].tolist(),
-                        "Geohash ID": test_data["Geohash ID"].tolist(),
+                        **geohash_key_values,
                         "Local Time": test_data["Local Time"].tolist(),
                         "Time Slot": test_data["Time Slot"].tolist(),
                         "Unix Timestamp": test_data["Unix Timestamp"].tolist(),
@@ -372,10 +410,10 @@ class FoursquareNYC(LightningDataModule):
         train_data_only = pd.concat(train_checkins, ignore_index=True)
 
         # Create POI trajectories from training data
+        
         poi_trajectories = train_data_only.groupby("Venue ID", sort=False).agg(
             {
-                "Geohash": "first",
-                "Geohash ID": "first",
+                **{key: value for key, value in zip(geohash_id_keys, ["first"]*len(geohash_id_keys))},
                 "Venue Category ID": "first",
                 "User ID": list,
                 "Local Time": list,
@@ -386,53 +424,30 @@ class FoursquareNYC(LightningDataModule):
         poi_trajectories = poi_trajectories.sort_values(by=["Venue ID"])
 
         return user_train_trajectories_df, user_test_trajectories_df, poi_trajectories  
-    # def _from_trajectories(sefl, df):
-    #     user_trajectories = df.groupby("User ID", sort=False).agg(
-    #         {
-    #             "Venue ID": list,
-    #             "Venue Category ID": list,
-    #             "Geohash ID":list,
-    #             "Local Time": list,
-    #             "Time Slot":list,
-    #             "Unix Timestamp": list,
-    #             # 'Normalized Timestamp': list
-    #         }
-    #     ).reset_index()
-        
-        
-    #     poi_trajectories = df.groupby("Venue ID", sort=False).agg(
-    #         {
-    #             "Geohash": "first",
-    #             "Geohash ID": "first",
-    #             "Venue Category ID": "first",
-    #             "User ID": list,
-    #             "Local Time": list,
-    #             "Time Slot": list,
-    #             "Unix Timestamp": list,
-    #             # 'Normalized Timestamp': list
-    #         }
-    #     ).reset_index()
-    #     poi_trajectories = poi_trajectories.sort_values(by=['Venue ID'])
-        
-    #     return user_trajectories, poi_trajectories
+
     
     def _process_location(self, df):
-        # for precision in self.geohash_precision:
-        #     df[f"geohash@{precision}"] = df.apply(lambda row: geohash.encode(row['Latitude'], row['Longitude'], precision=precision), axis=1)
-        df['Geohash'] = df.apply(lambda row: geohash.encode(row['Latitude'], row['Longitude'], precision=self.geohash_precision[0]), axis=1)
+        
+        for precision in self.geohash_precision:
+            df[f"Geohash P{precision}"] = df.apply(lambda row: geohash.encode(row['Latitude'], row['Longitude'], precision=precision), axis=1)
         df = df.drop(columns=['Latitude', 'Longitude'])
         
+        self.GEOHASH_TO_ID_MAP = {}
+        self.ID_TO_GEOHASH_MAP = {}
         # Create a mapping dictionary for geohash to integer ID
-        unique_geohashes = df['Geohash'].unique()
-        geohash_to_id = {geohash: idx for idx, geohash in enumerate(unique_geohashes, start=1)}
-        id_to_geohash = {idx: geohash for geohash, idx in geohash_to_id.items()}  # Reverse map for recovery
-        # Convert geohash to integer IDs
-        df['Geohash ID'] = df['Geohash'].map(geohash_to_id)
-
-        # df = df.drop(columns=['Geohash'])
-        # Store the mapping for recovery later (optional, depending on use case)
-        self.GEOHASH_TO_ID_MAP = geohash_to_id
-        self.ID_TO_GEOHASH_MAP = id_to_geohash
+        for precision in self.geohash_precision:
+            geohash_key = f"Geohash P{precision}"
+            geohash_id_key = f"Geohash P{precision} ID"
+            
+            unique_geohashes = df[geohash_key].unique()
+            geohash_to_id = {gh: idx for idx, gh in enumerate(unique_geohashes, start=1)} # Direct map for ID
+            id_to_geohash = {idx: gh for gh, idx in geohash_to_id.items()}  # Reverse map for recovery
+            df[geohash_id_key] = df[geohash_key].map(geohash_to_id)
+            df = df.drop(columns=[geohash_key])
+            
+            self.GEOHASH_TO_ID_MAP[geohash_key] = geohash_to_id
+            self.ID_TO_GEOHASH_MAP[geohash_key] = id_to_geohash
+        
         return df
     
     def _process_time(self, df):
