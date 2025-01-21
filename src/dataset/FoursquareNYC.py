@@ -199,9 +199,9 @@ class FoursquareNYC(LightningDataModule):
         self._load_data()
         self._preprocess_data()
         
-        self._form_spatial_graph()
-        self._form_temporal_graph()
-        
+        self._construct_spatial_graph()
+        self._construct_temporal_graph()
+        self._construct_hierarchical_spatial_graph()
         
     def prepare_data(self):
         # Download or prepare data if needed
@@ -247,7 +247,12 @@ class FoursquareNYC(LightningDataModule):
 
     
     
-    def _form_spatial_graph(self):
+    def _construct_spatial_graph(self):
+        """
+        Constructs spatial graph based on the equality of geohash codes on the specified precision.
+        The `spatial_graph_geohash_precision` argument of the class identifies the precision level.
+        POIs within the same area have a link.
+        """
         geohash_vec = np.array(self.poi_trajectories[f"Geohash P{self.spatial_graph_geohash_precision} ID"])
         
         adj_mat = (geohash_vec[:, None] == geohash_vec).astype(int)
@@ -255,7 +260,12 @@ class FoursquareNYC(LightningDataModule):
         self.spatial_graph = self.convert_to_sparse_tensor(adj_mat)
         print(f"Spatial graph sparsity: {1 -self.spatial_graph.density()}")
         
-    def _form_temporal_graph(self):
+    def _construct_temporal_graph(self):
+        """
+        Constructs the temporal graph based on the Jaccard similarity of the time slots of the check-ins
+        in the specific POI. If two POIs have similar time slots for their check-ins, there will be a 
+        link between them.
+        """
         num_venues = len(self.poi_trajectories['Venue ID'])
         num_timeslots = 56
         M = np.zeros((num_venues, num_timeslots), dtype=int)
@@ -292,6 +302,41 @@ class FoursquareNYC(LightningDataModule):
         self.temporal_graph = self.convert_to_sparse_tensor(adj_mat)
         print(f'Temporal graph sparsity: {1 - self.temporal_graph.density()}')
 
+
+    def _construct_hierarchical_spatial_graph(self):
+        """
+        Constructs hierarchical mappings from one geohash precision to the next and finally to POIs.
+        The levels of the graph start from the lowest geohash precision and forms one layer for each
+        geohash precisoin and in the final layer adds POIs.
+        
+        """
+        df = self.poi_trajectories
+        graph = {}
+        
+        for i in range(len(self.geohash_precision) - 1):
+            parnent_prc = self.geohash_precision[i]
+            child_prc = self.geohash_precision[i+1]
+            
+            parent_col = f"Geohash P{parnent_prc} ID"
+            child_col = f"Geohash P{child_prc} ID"
+            
+            # Group children by their parent geohash
+            parent_to_children = (
+                df.groupby(parent_col)[child_col]
+                .apply(lambda x: list(x.unique()))
+                .to_dict()
+            )
+            graph[f"P{parnent_prc}_to_P{child_prc}"] = parent_to_children
+        
+        
+        # Map last precision geohashes to POIs
+        graph[f"P{self.geohash_precision[-1]}_to_POI"]= (
+            df.groupby(f"Geohash P{self.geohash_precision[-1]} ID")['Venue ID']
+            .apply(lambda x: list(x.unique()))
+            .to_dict()
+        )
+        
+        self.hierarchical_spatial_graph = graph
     
     def _preprocess_data(self):
         
@@ -304,44 +349,38 @@ class FoursquareNYC(LightningDataModule):
         df_flt = self._filter_user_venue(df_flt)
         print('Dateset statistics after filtering:')
         self._log_stats(df_flt)
-        
-
-        
+    
         df_flt = self._reassign_IDs(df_flt)
         
-        distances = self._calculate_discrepancy_in_locations(df_flt)
+        # distances = self._calculate_discrepancy_in_locations(df_flt)
+        # i = 0
+        # for venue, distance in distances:
+        #     print(venue, distance)
+        #     i += 1
+        #     if i == 5:
+        #         break
+        # i = 0
+        # for venue, distance in distances:
+        #     if distance > 100.0:
+        #         i+=1
+        # print('num venues with more than 200 min check-ins', i)
         
-        i = 0
-        for venue, distance in distances:
-            print(venue, distance)
-            i += 1
-            if i == 5:
-                break
-        i = 0
-        for venue, distance in distances:
-            if distance > 100.0:
-                i+=1
-                
         df_flt = self._replace_locations_with_average(df_flt)
         
-        distances = self._calculate_discrepancy_in_locations(df_flt)
+        # distances = self._calculate_discrepancy_in_locations(df_flt)
+        # i = 0
+        # for venue, distance in distances:
+        #     print(venue, distance)
+        #     i += 1
+        #     if i == 5:
+        #         break
+        # i = 0
+        # for venue, distance in distances:
+        #     if distance > 100.0:
+        #         i+=1
         
-        i = 0
-        for venue, distance in distances:
-            print(venue, distance)
-            i += 1
-            if i == 5:
-                break
-        i = 0
-        for venue, distance in distances:
-            if distance > 100.0:
-                i+=1
-        
-        
-        print('num venues with more than 200 min check-ins', i)
-        exit()
+        # print('num venues with more than 200 min check-ins', i)
 
-        
 
         self.STATS = {
             'num_user': df_flt['User ID'].nunique(),
@@ -352,14 +391,15 @@ class FoursquareNYC(LightningDataModule):
         
         df_flt = self._process_time(df_flt)
         df_flt = self._process_location(df_flt)
-        # issues = self._check_geohash_consistency(df_flt)
-        # print('Inconsistencies :', len(issues[5]), len(issues[6]), len(issues[7]))
-        # exit()
         
         gh_id_keys = [f"Geohash P{prc} ID" for prc in self.geohash_precision]
         stats_gh_keys = [f"num_gh_P{prc}" for prc in self.geohash_precision]
         
         self.STATS.update({**{key: val for key, val in zip(stats_gh_keys, [df_flt[gh_key].nunique() for gh_key in gh_id_keys])},})
+        
+        # issues = self._check_geohash_consistency(df_flt)
+        # print(self.STATS)
+        # exit()
         
         # user_trajectories, poi_trajectories = self._from_trajectories(df_flt)
         user_train_trajectories, user_test_trajectories, poi_trajectories = self._from_trajectories_with_split(df_flt, self.num_test_checkins)
