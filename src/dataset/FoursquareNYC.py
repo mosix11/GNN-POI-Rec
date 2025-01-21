@@ -97,6 +97,7 @@ class UserTrajectoryDataset(Dataset):
         gh, gh_lens = zip(*processed_gh)
         ts, ts_lens = zip(*processed_ts)
         ut, ut_lens = zip(*processed_ut)
+        
 
         # Pad sequences to max_seq_length
         pois = pad_sequence(pois, batch_first=True, padding_value=0)
@@ -117,8 +118,8 @@ class UserTrajectoryDataset(Dataset):
         else:
             orig_lens = torch.tensor(pois_lens)
             x = (users, pois, pois_cat, gh, ts, ut)
-            y = zip(*test_batch)
-            # return users, pois, pois_cat, gh, ts, ut
+            t_users, t_pois, t_pois_cat, t_gh, t_ts, t_ut = zip(*test_batch)
+            y = (torch.tensor(t_users), torch.stack(t_pois))
             return x, y, orig_lens
             
         
@@ -176,11 +177,6 @@ class FoursquareNYC(LightningDataModule):
         self.spatial_graph_self_loop = spatial_graph_self_loop
         self.temporal_graph_self_loop = temporal_graph_self_loop
         
-        
-        
-        
-    def prepare_data(self):
-        # Download or prepare data if needed
         self._download_dataset()
         self._load_data()
         self._preprocess_data()
@@ -188,6 +184,10 @@ class FoursquareNYC(LightningDataModule):
         self._form_spatial_graph()
         self._form_temporal_graph()
         
+        
+    def prepare_data(self):
+        # Download or prepare data if needed
+        ...
         
 
 
@@ -233,7 +233,7 @@ class FoursquareNYC(LightningDataModule):
         
         for i, row in enumerate(self.poi_trajectories['Time Slot']):
             for t in row:
-                M[i, t] += 1
+                M[i, t-1] += 1
                 
         if self.temporal_graph_jaccard_mult_set:
             # Multiset Jaccard Similarity (multiset implementation)
@@ -275,7 +275,16 @@ class FoursquareNYC(LightningDataModule):
         df_flt = self._filter_user_venue(df_flt)
         print('Dateset statistics after filtering:')
         self._log_stats(df_flt)
+
+        
         df_flt = self._reassign_IDs(df_flt)
+        
+        self.STATS = {
+            'num_user': df_flt['User ID'].nunique(),
+            'num_pois': df_flt['Venue ID'].nunique(),
+            'num_poi_cat': df_flt['Venue Category ID'].nunique(),
+            'num_time_slots': 56
+        }
         
         df_flt = self._process_time(df_flt)
         df_flt = self._process_location(df_flt)
@@ -442,7 +451,7 @@ class FoursquareNYC(LightningDataModule):
 
             # Calculate the time slot (each day has 8 slots, each slot is 3 hours)
             # Slot formula: (Day of Week * 8) + (Hour // 3)
-            df['Time Slot'] = (df['Day of Week'] * 8) + (df['Hour'] // 3)
+            df['Time Slot'] = (df['Day of Week'] * 8) + (df['Hour'] // 3) + 1
 
             # Drop intermediate columns if not needed
             df = df.drop(columns=['Day of Week', 'Hour'])

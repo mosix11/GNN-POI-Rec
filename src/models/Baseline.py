@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
-import lightning.pytorch as pl
+import pytorch_lightning as pl
 
 from ..metrics import MRR, AccuracyK
 
@@ -11,32 +11,41 @@ class TrajLSTM(pl.LightningModule):
     
     def __init__(self,
                  num_user:int = None,
-                 user_emb_dim:int = 256,
-                 num_poi:int = None,
-                 poi_emb_dim:int = 256,
-                 hidden_dim:int = 512,
+                 user_emb_dim:int = 512,
+                 num_pois:int = None,
+                 poi_emb_dim:int = 512,
+                 hidden_dim:int = 1024,
                  num_layers:int = 1,
-                 lstm_dropout:float = 0,
-                 emb_dropout:float = 0,
+                 lstm_dropout:float = 0.5,
+                 emb_dropout:float = 0.9,
+                 
+                 optim_lr:float = 1e-4,
+                 optim_type:str = 'adamw'
                  ):
         super().__init__()
         
         assert num_user != None, 'The number of Users should be specified.'
-        assert num_poi != None, 'The number of POIs should be specified.'
+        assert num_pois != None, 'The number of POIs should be specified.'
         
-        self.num_user = num_user
+        num_user += 1 # index 0 is padding 
+        num_pois += 1 # index 0 is padding
+        
+        self.num_user = num_user 
         self.user_emb_dim = user_emb_dim
-        self.num_poi = num_poi
+        self.num_poi = num_pois
         self.poi_emb_dim = poi_emb_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        
+        self.optim_lr = optim_lr
+        self.optim_type = optim_type
 
 
         
         self.user_emb = nn.Embedding(num_embeddings=num_user,
                                      embedding_dim=user_emb_dim,
                                      padding_idx=0)
-        self.poi_emb = nn.Embedding(num_embeddings=num_poi,
+        self.poi_emb = nn.Embedding(num_embeddings=num_pois,
                                     embedding_dim=poi_emb_dim,
                                     padding_idx=0)
         
@@ -50,7 +59,7 @@ class TrajLSTM(pl.LightningModule):
                            dropout=lstm_dropout)
         
         self.out_projector = nn.Linear(in_features=hidden_dim,
-                                       out_features=num_poi)
+                                       out_features=num_pois)
         
         
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
@@ -74,9 +83,10 @@ class TrajLSTM(pl.LightningModule):
         inputs = torch.cat([poi_embs, user_embs], dim=-1)  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
         inputs = self.emb_dropout(inputs)
         
+        
         pck_inputs = pack_padded_sequence(
             inputs,
-            lengths=orig_lengths,      
+            lengths=orig_lengths.to('cpu'),      
             batch_first=True, 
             enforce_sorted=False       # or True if you're sure it's sorted
         )
@@ -90,7 +100,7 @@ class TrajLSTM(pl.LightningModule):
         
         return logits
 
-    def training_step(self, batch):
+    def training_step(self, batch, batch_idx):
         # Training step logic
         """
             Batch contains x, y, original lengths,
@@ -104,12 +114,12 @@ class TrajLSTM(pl.LightningModule):
         user_ids, pois = x[0], x[1] # User ID shape [batch], POIs shape [batch, seq_len]
         seq_len = pois.size(1)
         
-        mask = torch.arange(seq_len).expand(len(orig_lengths), seq_len) < orig_lengths.unsqueeze(1)
+        mask = torch.arange(seq_len, device=user_ids.device).expand(len(orig_lengths), seq_len) < orig_lengths.unsqueeze(1)
         # user IDs are the same for all elements in the sequence (trajectory)
-        user_ids = user_ids.unsqueeze(1, 2).repeat(1, seq_len) # shape [batch, seq_len]
+        user_ids = user_ids.unsqueeze(1).repeat(1, seq_len) # shape [batch, seq_len]
         user_ids *= mask
         
-        logits = self.forward(user_ids, pois)
+        logits = self.forward(user_ids, pois, orig_lengths)
         
         
         logits = logits.view(-1, self.num_poi)
@@ -118,17 +128,10 @@ class TrajLSTM(pl.LightningModule):
         
         loss = self.loss_fn(logits, true_pois)
         
-        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
+        self.log('Train/Loss', loss, on_epoch=True, reduce_fx='mean', prog_bar=True)
         return loss
-        
-        predictions = torch.argmax(logits, dim=-1)  # (batch_size * seq_len)
-        valid_mask = true_pois != 0  # Exclude padding from metrics
-        
-        acc = (predictions[valid_mask] == y[valid_mask]).float().mean()
-        self.log('train_loss', loss, on_epoch=True, prog_bar=True)
-        self.log('train_acc', acc, on_epoch=True, prog_bar=True)
 
-    def validation_step(self, batch):
+    def validation_step(self, batch, batch_idx):
         # Validation step logic
         """
             Batch contains x, y, original lengths,
@@ -148,30 +151,46 @@ class TrajLSTM(pl.LightningModule):
         user_ids, pois = x[0], x[1] # User ID shape [batch], POIs shape [batch, seq_len]
         seq_len = pois.size(1)
         
-        mask = torch.arange(seq_len).expand(len(orig_lengths), seq_len) < orig_lengths.unsqueeze(1)
-        user_ids = user_ids.unsqueeze(1, 2).repeat(1, seq_len) # shape [batch, seq_len]
+        mask = torch.arange(seq_len, device=user_ids.device).expand(len(orig_lengths), seq_len) < orig_lengths.unsqueeze(1)
+        user_ids = user_ids.unsqueeze(1).repeat(1, seq_len) # shape [batch, seq_len]
         user_ids *= mask
         
-        logits = self.forward(user_ids, pois) # shape (batch, seq_len, num_poi)
-        last_logit = logits[:, -1, :].squeeze(1) # shape (batch, num_poi)
+
+        logits = self.forward(user_ids, pois, orig_lengths) # shape (batch, seq_len, num_poi)
+
+        last_valid_indices = orig_lengths - 1
+        batch_indices = torch.arange(logits.size(0), device=user_ids.device)
+        last_logit = logits[batch_indices, last_valid_indices, :] # shape (batch, num_poi)
         
-        true_pois = y[1][0] # take the first POI in the test check-ins shape (batch, 1)
+        true_pois = y[1][:, 0] # take the first POI in the test check-ins shape (batch)
         true_pois = true_pois.reshape(-1)
         
         loss = self.loss_fn(last_logit, true_pois)
         
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True)
+        acc1 = self.acc1(last_logit, true_pois)
+        acc5 = self.acc5(last_logit, true_pois)
+        acc10 = self.acc10(last_logit, true_pois)
+        acc20 = self.acc20(last_logit, true_pois)
+        mrr = self.mrr(last_logit, true_pois)
         
-        pass
+        self.log('Val/Loss', loss, on_epoch=True, reduce_fx='mean', prog_bar=True)
+        self.log('Val/Acc@1', acc1, on_epoch=True, reduce_fx='mean', prog_bar=True)
+        self.log('Val/Acc@5', acc5, on_epoch=True, reduce_fx='mean', prog_bar=True)
+        self.log('Val/Acc@10', acc10, on_epoch=True, reduce_fx='mean', prog_bar=True)
+        self.log('Val/Acc@20', acc20, on_epoch=True, reduce_fx='mean', prog_bar=True)
+        self.log('Val/MRR', mrr, on_epoch=True, reduce_fx='mean', prog_bar=True)
     
     
-    def evaluation_step(self, trajectory):
-        pass
+    def test_step(self, batch, batch_idx):
+        ...
     
 
     def configure_optimizers(self):
         """
         Optimizer configuration
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        if self.optim_type == "adamw":
+            optimizer = torch.optim.AdamW(self.parameters(), lr=self.optim_lr)
+        elif self.optim_type == "adam":
+            optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
         return optimizer

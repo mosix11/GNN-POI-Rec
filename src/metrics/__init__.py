@@ -1,2 +1,2 @@
-from AccuracyK import AccuracyK, Accuracy1
-from MRR import MRR
+from .AccuracyK import AccuracyK
+from .MRR import MRR
