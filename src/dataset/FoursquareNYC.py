@@ -3,6 +3,9 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from itertools import combinations
+from math import radians, sin, cos, sqrt, atan2, degrees
+
 from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
 
@@ -301,9 +304,43 @@ class FoursquareNYC(LightningDataModule):
         df_flt = self._filter_user_venue(df_flt)
         print('Dateset statistics after filtering:')
         self._log_stats(df_flt)
+        
 
         
         df_flt = self._reassign_IDs(df_flt)
+        
+        distances = self._calculate_discrepancy_in_locations(df_flt)
+        
+        i = 0
+        for venue, distance in distances:
+            print(venue, distance)
+            i += 1
+            if i == 5:
+                break
+        i = 0
+        for venue, distance in distances:
+            if distance > 100.0:
+                i+=1
+                
+        df_flt = self._replace_locations_with_average(df_flt)
+        
+        distances = self._calculate_discrepancy_in_locations(df_flt)
+        
+        i = 0
+        for venue, distance in distances:
+            print(venue, distance)
+            i += 1
+            if i == 5:
+                break
+        i = 0
+        for venue, distance in distances:
+            if distance > 100.0:
+                i+=1
+        
+        
+        print('num venues with more than 200 min check-ins', i)
+        exit()
+
         
 
         self.STATS = {
@@ -315,6 +352,9 @@ class FoursquareNYC(LightningDataModule):
         
         df_flt = self._process_time(df_flt)
         df_flt = self._process_location(df_flt)
+        # issues = self._check_geohash_consistency(df_flt)
+        # print('Inconsistencies :', len(issues[5]), len(issues[6]), len(issues[7]))
+        # exit()
         
         gh_id_keys = [f"Geohash P{prc} ID" for prc in self.geohash_precision]
         stats_gh_keys = [f"num_gh_P{prc}" for prc in self.geohash_precision]
@@ -357,7 +397,7 @@ class FoursquareNYC(LightningDataModule):
         # memory_usage = self.df_preprocessed.memory_usage(deep=True).sum()
         # print(f"The DataFrame is using {memory_usage / 1024:.2f} KB in memory.")
 
-    def _from_trajectories_with_split(self, df, num_test_checkins):
+    def _from_trajectories_with_split(self, df:pd.DataFrame, num_test_checkins:int):
         # Initialize lists for train and test trajectories
         user_train_trajectories = []
         user_test_trajectories = []
@@ -426,7 +466,7 @@ class FoursquareNYC(LightningDataModule):
         return user_train_trajectories_df, user_test_trajectories_df, poi_trajectories  
 
     
-    def _process_location(self, df):
+    def _process_location(self, df:pd.DataFrame):
         
         for precision in self.geohash_precision:
             df[f"Geohash P{precision}"] = df.apply(lambda row: geohash.encode(row['Latitude'], row['Longitude'], precision=precision), axis=1)
@@ -450,7 +490,19 @@ class FoursquareNYC(LightningDataModule):
         
         return df
     
-    def _process_time(self, df):
+    def _check_geohash_consistency(self, df:pd.DataFrame):
+        issues = {}
+        for precision in self.geohash_precision:
+            column_name = f"Geohash P{precision} ID"
+            # Group by Venue ID and count unique geohashes per group
+            inconsistent_venues = df.groupby('Venue ID')[column_name].nunique()
+            # Find Venue IDs with more than one unique geohash
+            problematic = inconsistent_venues[inconsistent_venues > 1]
+            if not problematic.empty:
+                issues[precision] = problematic.index.tolist()
+        return issues
+    
+    def _process_time(self, df:pd.DataFrame):
         
         def calculate_local_time(utc_time, timezone_offset):
             # Parse the UTC time string
@@ -484,7 +536,7 @@ class FoursquareNYC(LightningDataModule):
         
         return df
     
-    def _reassign_IDs(self, df):
+    def _reassign_IDs(self, df:pd.DataFrame):
         df['User ID'] = pd.factorize(df['User ID'])[0] + 1
         venue_id_mapping = {id_: idx for idx, id_ in enumerate(df['Venue ID'].unique(), start=1)}
         venue_category_id_mapping = {id_: idx for idx, id_ in enumerate(df['Venue Category ID'].unique(), start=1)}
@@ -499,14 +551,9 @@ class FoursquareNYC(LightningDataModule):
         return df
         
 
-    def _log_stats(self, df):
-        num_user_checkins = df['User ID'].value_counts()
-        num_venue_checkins = df['Venue ID'].value_counts()
-        print(f"Number of users: {df['User ID'].nunique()}, with min = {num_user_checkins.min()}, max = {num_user_checkins.max()}, and avg: {num_user_checkins.mean()}")
-        print(f"Number of venues: {df['Venue ID'].nunique()}, with min = {num_venue_checkins.min()}, max = {num_venue_checkins.max()}, and avg: {num_venue_checkins.mean()}")
-        print(f"Number of venue categories: {df['Venue Category ID'].nunique()}")
+
         
-    def _filter_user_venue(self, df):
+    def _filter_user_venue(self, df:pd.DataFrame):
         num_user_checkins = df['User ID'].value_counts()
         num_venue_checkins = df['Venue ID'].value_counts()
         # num_venue_users = self.df.groupby("Venue ID")["User ID"].nunique()
@@ -530,6 +577,14 @@ class FoursquareNYC(LightningDataModule):
         # print(f"Number of rows: {df.shape[0]} | Number of columns: {df.shape[1]} ")
         # print("\nSummary of 'null' values in each column:")
         # print(column_null_counts)
+        
+    def _log_stats(self, df:pd.DataFrame):
+        num_user_checkins = df['User ID'].value_counts()
+        num_venue_checkins = df['Venue ID'].value_counts()
+        print(f"Number of records: {df.shape[0]}")
+        print(f"Number of users: {df['User ID'].nunique()}, with min = {num_user_checkins.min()}, max = {num_user_checkins.max()}, and avg: {num_user_checkins.mean()}")
+        print(f"Number of venues: {df['Venue ID'].nunique()}, with min = {num_venue_checkins.min()}, max = {num_venue_checkins.max()}, and avg: {num_venue_checkins.mean()}")
+        print(f"Number of venue categories: {df['Venue Category ID'].nunique()}")
     
     def _download_dataset(self):
         zip_file_path = self.FNYC_dir.joinpath(Path('dataset.zip'))
@@ -603,3 +658,138 @@ class FoursquareNYC(LightningDataModule):
         plt.ylabel(y_label)
         plt.title('Distribution Plot')
         plt.show()
+        
+        
+        
+    def _collect_unique_venue_locations(self, df:pd.DataFrame):
+        # Group by 'Venue ID' and aggregate unique locations (Latitude, Longitude)
+        venue_locations = (
+            df.groupby('Venue ID')
+            .apply(lambda group: group[['Latitude', 'Longitude']].drop_duplicates().values.tolist())
+            .to_dict()
+        )
+        return venue_locations
+        
+    def _replace_locations_with_average(self, df:pd.DataFrame):
+        """
+            This method is generated by ChatGPT.
+            This method finds all locations assigned to a POI and takes their average.
+        """
+        def calculate_average_location(locations):
+            """
+            Calculate the average latitude and longitude for a list of locations using spherical coordinates.
+
+            Args:
+                locations (list): A list of tuples representing (latitude, longitude).
+
+            Returns:
+                tuple: The average (latitude, longitude) in decimal degrees.
+            """
+            x = y = z = 0.0
+
+            for lat, lon in locations:
+                lat_rad = radians(lat)
+                lon_rad = radians(lon)
+                x += cos(lat_rad) * cos(lon_rad)
+                y += cos(lat_rad) * sin(lon_rad)
+                z += sin(lat_rad)
+
+            total = len(locations)
+            x /= total
+            y /= total
+            z /= total
+
+            lon_avg = atan2(y, x)
+            hyp = sqrt(x * x + y * y)
+            lat_avg = atan2(z, hyp)
+
+            return degrees(lat_avg), degrees(lon_avg)
+        
+
+        # Collect unique locations for each venue
+        venue_locations = self._collect_unique_venue_locations(df)
+
+        # Calculate average location for each venue
+        average_locations = {venue: calculate_average_location(locations) for venue, locations in venue_locations.items()}
+
+        # Replace latitude and longitude in the original dataframe
+        df['Latitude'] = df['Venue ID'].map(lambda venue: average_locations[venue][0])
+        df['Longitude'] = df['Venue ID'].map(lambda venue: average_locations[venue][1])
+
+        return df
+
+        
+    def _calculate_discrepancy_in_locations(self, df:pd.DataFrame):
+        """
+            This method is generate by ChatGPT.
+            It first findes the different locations assigned to a POI in the dataset and
+            then finds the maximum distance between those locations. The distance is calculated
+            based on Latitude and Longitude of the locations and is Haversine Distance in meters.
+        """
+        def haversine_distance(loc1, loc2):
+            """
+            Calculate the great-circle distance between two points on the Earth using the Haversine formula.
+
+            Args:
+                loc1 (tuple): (latitude, longitude) of the first location in decimal degrees.
+                loc2 (tuple): (latitude, longitude) of the second location in decimal degrees.
+
+            Returns:
+                float: Distance between the two points in kilometers.
+            """
+            # Radius of the Earth in kilometers
+            R = 6371.0
+
+            # Convert latitude and longitude from degrees to radians
+            lat1, lon1 = radians(loc1[0]), radians(loc1[1])
+            lat2, lon2 = radians(loc2[0]), radians(loc2[1])
+
+            # Differences in coordinates
+            dlat = lat2 - lat1
+            dlon = lon2 - lon1
+
+            # Haversine formula
+            a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+            c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+            # Distance
+            return R * c * 1000
+
+        def calculate_longest_distance(venue_locations):
+            """
+            Calculate the longest great-circle distance between different locations assigned to each unique venue.
+
+            Args:
+                venue_locations (dict): A dictionary where keys are Venue IDs and values are lists of unique locations (latitude, longitude).
+
+            Returns:
+                dict: A dictionary where keys are Venue IDs and values are the longest great-circle distance (if more than one location exists).
+            """
+            longest_distances = {}
+
+            for venue, locations in venue_locations.items():
+                if len(locations) > 1:
+                    # Calculate all pairwise distances using the Haversine formula
+                    distances = [haversine_distance(loc1, loc2) for loc1, loc2 in combinations(locations, 2)]
+                    longest_distances[venue] = max(distances)
+                else:
+                    longest_distances[venue] = 0  # No distance if only one location
+
+            return longest_distances
+
+        def get_sorted_venues_by_distance(longest_distances):
+            """
+            Sort venues by their longest distances in descending order.
+
+            Args:
+                longest_distances (dict): A dictionary where keys are Venue IDs and values are the longest Euclidean distances.
+
+            Returns:
+                list: A list of tuples sorted by longest distance in descending order (Venue ID, Longest Distance).
+            """
+            return sorted(longest_distances.items(), key=lambda x: x[1], reverse=True)
+        
+        unique_venue_locations = self._collect_unique_venue_locations(df)
+        longest_distances = calculate_longest_distance(unique_venue_locations)
+        sorted_venues = get_sorted_venues_by_distance(longest_distances)
+        return sorted_venues
