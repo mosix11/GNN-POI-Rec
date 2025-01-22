@@ -17,7 +17,7 @@ class TrajLSTM(pl.LightningModule):
         poi_emb_dim: int = 512,
         hidden_dim: int = 1024,
         num_layers: int = 1,
-        lstm_dropout: float = 0.5,
+        lstm_dropout: float = 0.0,
         emb_dropout: float = 0.5,
         optim_lr: float = 1e-4,
         optim_type: str = "adamw",
@@ -66,9 +66,10 @@ class TrajLSTM(pl.LightningModule):
     def forward(self, user_ids, pois, orig_lengths):
         """
         Forward pass logic
-        user_ids: Tensor of shape (batch_size, seq_len)
-        pois: Tensor of shape (batch_size, seq_len)
-        Returns logits of shape (batch_size, seq_len, num_poi)
+        `user_ids`: Tensor of shape (batch, seq_len)
+        `pois`: Tensor of shape (batch, seq_len)
+        `orig_lengths`: Tensor of shape (batch)
+        Returns logits of shape (batch, seq_len, num_poi)
         """
         user_embs = self.user_emb(user_ids)
         poi_embs = self.poi_emb(pois)
@@ -187,6 +188,8 @@ class TrajLSTM(pl.LightningModule):
         self.log("Val/Acc@10", acc10, on_epoch=True, reduce_fx="mean", prog_bar=True)
         self.log("Val/Acc@20", acc20, on_epoch=True, reduce_fx="mean", prog_bar=True)
         self.log("Val/MRR", mrr, on_epoch=True, reduce_fx="mean", prog_bar=True)
+        
+        return loss
 
     def test_step(self, batch, batch_idx): ...
 

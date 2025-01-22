@@ -73,6 +73,7 @@ class UserTrajectoryDataset(Dataset):
             gh3 = None
         elif len(geohash_precision) == 3:
             users, pois, pois_cat, gh1, gh2, gh3, ts, ut = zip(*train_batch)
+        else: raise RuntimeError('The case for more than 3 geohash precisions in not handeled.')
 
         # In the test phase we pad all sequences in the batch to the longest
         # sequence length in the batch since we don't want to remove any
@@ -135,15 +136,16 @@ class UserTrajectoryDataset(Dataset):
 
         if train:
             orig_lens = torch.tensor(pois_lens) - 1  # TODO check the correctness
-            # x = (users, pois[:, :-1], pois_cat[:, :-1], gh1[:, :-1], ts[:, :-1], ut[:, :-1])
-            # y = (users, pois[:, 1:], pois_cat[:, 1:], gh1[:, 1:])
+            mask = torch.arange(max_seq_length - 1).expand(
+                len(orig_lens), max_seq_length - 1
+            ) < orig_lens.unsqueeze(1)
             x = (
                 users,
-                pois[:, :-1],
-                pois_cat[:, :-1],
-                *[gh_[:, :-1] for gh_ in ghs],
-                ts[:, :-1],
-                ut[:, :-1],
+                pois[:, :-1] * mask,
+                pois_cat[:, :-1] * mask,
+                *[gh_[:, :-1] * mask for gh_ in ghs],
+                ts[:, :-1] * mask,
+                ut[:, :-1] * mask,
             )
             y = (users, pois[:, 1:], pois_cat[:, 1:], *[gh_[:, 1:] for gh_ in ghs])
             return x, y, orig_lens
