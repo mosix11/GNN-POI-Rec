@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from torch_geometric.nn import GATConv
+import torch_geometric.nn as tgnn
 
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
@@ -111,19 +111,21 @@ class HTM_GRN(pl.LightningModule):
 
         self.emb_dropout = nn.Dropout(p=emb_dropout)
 
-        self.temporalGAT = GATConv(
+        self.temporalGAT = tgnn.GATConv(
             poi_emb_dim,
             poi_emb_dim,
             heads=num_GAT_heads,
-            concat=True,
+            concat=False,
             dropout=GAT_dropout,
+            add_self_loops=False
         )
-        self.spatialGAT = GATConv(
+        self.spatialGAT = tgnn.GATConv(
             poi_emb_dim,
             poi_emb_dim,
             heads=num_GAT_heads,
-            concat=True,
+            concat=False,
             dropout=GAT_dropout,
+            add_self_loops=False
         )
 
         self.net = nn.LSTM(
@@ -198,6 +200,64 @@ class HTM_GRN(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
 
+        
+        # Extract the neighbors of the nodes in the batch from spatial and temporal graphs
+        # The resulting tensors have shape: (batch, seq_len, num_pois)
+        # The third dimension contains binary vector representing neighbors IDs.
+        pois_spatial_neighbors = self.spatial_graph[pois]
+        pois_temporal_neighbors = self.temporal_graph[pois]
+        
+        # We create two new tensors to store the spatially and temporally attended POI embeddings
+        spatially_attended_poi_embs = torch.zeros_like(poi_embs, dtype=poi_embs.dtype, device=poi_embs.device)
+        temporally_attended_poi_embs = torch.zeros_like(poi_embs, dtype=poi_embs.dtype, device=poi_embs.device)
+        for batch_index in range(batch_size):
+            for seq_index in range(seq_len):
+                POI = pois[batch_index, seq_index]
+                POI_emb = poi_embs[batch_index, seq_index]
+                if POI != 0: # skip padding tokens
+                    POI_sp_nbs = torch.nonzero(pois_spatial_neighbors[batch_index, seq_index]).squeeze(1) # shape (num_neighbors)
+                    POI_tmp_nbs = torch.nonzero(pois_temporal_neighbors[batch_index, seq_index]).squeeze(1) # shape (num_neighbors)
+                    POI_sp_nbs_embs = self.poi_emb(POI_sp_nbs)
+                    POI_tmp_nbs_embs = self.poi_emb(POI_tmp_nbs)
+                    
+                    # POI_sp_nbs_embs = self.emb_dropout(POI_sp_nbs_embs)
+                    # POI_tmp_nbs_embs = self.emb_dropout(POI_tmp_nbs_embs)
+                    
+                    POI_sp_nbs_embs = torch.cat([POI_emb.unsqueeze(0), POI_sp_nbs_embs], dim=0) # shape (num_neighbors+1)
+                    POI_tmp_nbs_embs = torch.cat([POI_emb.unsqueeze(0), POI_tmp_nbs_embs], dim=0) # shape (num_neighbors+1)
+                    
+                    # Cunstruct the COO format edge indecies for GATConv input
+                    spatial_edge_index = torch.stack([
+                        torch.zeros(len(POI_sp_nbs), dtype=torch.long),  # POI -> neighbors
+                        torch.arange(1, len(POI_sp_nbs) + 1, dtype=torch.long)  # neighbors -> POI
+                    ], dim=0).to(POI.device)
+                    
+                    # Since the graph is undirected we have to add edges from neighbors to POI
+                    sp_reversed_edges = spatial_edge_index.flip(0)
+                    spatial_edge_index = torch.cat([spatial_edge_index, sp_reversed_edges], dim=1)
+                    # Add self-loop for POI
+                    spatial_edge_index = torch.cat([torch.tensor([[0], [0]]).to(POI.device), spatial_edge_index], dim=1)
+                    
+                    temporal_edge_index = torch.stack([
+                        torch.zeros(len(POI_tmp_nbs), dtype=torch.long),  # POI -> neighbors
+                        torch.arange(1, len(POI_tmp_nbs) + 1, dtype=torch.long)  # neighbors -> POI
+                    ], dim=0).to(POI.device)
+                    
+                    tp_reversed_edges = temporal_edge_index.flip(0)
+                    temporal_edge_index = torch.cat([temporal_edge_index, tp_reversed_edges], dim=1)
+                    temporal_edge_index = torch.cat([torch.tensor([[0], [0]]).to(POI.device), temporal_edge_index], dim=1)
+                    
+                    POI_spatialy_attended = self.spatialGAT(POI_sp_nbs_embs, spatial_edge_index)[0]
+                    POI_temporally_attended = self.temporalGAT(POI_tmp_nbs_embs, temporal_edge_index)[0]
+                    
+                    spatially_attended_poi_embs[batch_index, seq_index] = POI_spatialy_attended
+                    temporally_attended_poi_embs[batch_index, seq_index] = POI_temporally_attended
+                else:
+                    spatially_attended_poi_embs[batch_index, seq_index] = POI_emb
+                    temporally_attended_poi_embs[batch_index, seq_index] = POI_emb
+
+                    
+                    
         lstm_inputs = torch.cat(
             [poi_embs, user_embs], dim=-1
         )  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
@@ -209,25 +269,8 @@ class HTM_GRN(pl.LightningModule):
             lstm_inputs = torch.cat([lstm_inputs, ts_embs], dim=-1) 
 
         inputs = self.emb_dropout(inputs)
-        
-        # Extract the closed neighbors of the nodes in the batch from spatial and temporal graphs
-        # The resulting tensors have shape: (batch, seq_len, num_pois)
-        # The third dimension contains binary vector representing neighbors IDs.
-        pois_spatial_neighbors = self.spatial_graph[pois]
-        pois_temporal_neighbors = self.temporal_graph[pois]
-        
-        for batch_index in range(batch_size):
-            for seq_index in range(seq_len):
-                POI = pois[batch_index][seq_index]
-                POI_spatial_nbs = pois_spatial_neighbors[batch_index, seq_index]
-                POI_temporal_nbs = pois_temporal_neighbors[batch_index, seq_index]
                 
-                
-            POI_seq = pois[batch_index]
-            for POI in POI_seq:
-                
-            POI_seq_spatial_nbs = pois_spatial_neighbors[batch_index]
-            POI_seq_temporal_nbs = pois_temporal_neighbors[batch_index]
+
             
 
         pck_inputs = pack_padded_sequence(
@@ -367,3 +410,6 @@ class HTM_GRN(pl.LightningModule):
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
         return optimizer
+
+
+

@@ -171,9 +171,9 @@ class FoursquareNYC(LightningDataModule):
         traj_sampling_method: str = "window",
         temporal_graph_jaccard_mult_set: bool = True,
         temporal_graph_jaccard_sim_tsh: float = 0.9,
-        spatial_graph_self_loop: bool = True,
+        spatial_graph_self_loop: bool = False,
         spatial_graph_geohash_precision: int = 6,
-        temporal_graph_self_loop: bool = True,
+        temporal_graph_self_loop: bool = False,
         seed: int = 11,
     ) -> None:
 
