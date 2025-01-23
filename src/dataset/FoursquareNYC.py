@@ -67,18 +67,37 @@ class UserTrajectoryDataset(Dataset):
 
         if len(geohash_precision) == 1:
             users, pois, pois_cat, gh1, ts, ut = zip(*train_batch)
-            gh2, gh3 = None, None
+            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_ts, tgt_ut = zip(
+                *test_batch
+            )
+            gh2, gh3, tgt_gh2, tgt_gh3 = None, None, None, None
         elif len(geohash_precision) == 2:
             users, pois, pois_cat, gh1, gh2, ts, ut = zip(*train_batch)
-            gh3 = None
+            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2, tgt_ts, tgt_ut = zip(
+                *test_batch
+            )
+            gh3, tgt_gh3 = None
         elif len(geohash_precision) == 3:
             users, pois, pois_cat, gh1, gh2, gh3, ts, ut = zip(*train_batch)
-        else: raise RuntimeError('The case for more than 3 geohash precisions in not handeled.')
+            (
+                tgt_users,
+                tgt_pois,
+                tgt_pois_cat,
+                tgt_gh1,
+                tgt_gh2,
+                tgt_gh3,
+                tgt_ts,
+                tgt_ut,
+            ) = zip(*test_batch)
+        else:
+            raise RuntimeError(
+                "The case for more than 3 geohash precisions in not handeled."
+            )
 
         # In the test phase we pad all sequences in the batch to the longest
         # sequence length in the batch since we don't want to remove any
         # information.
-        if not train:
+        if not train or max_seq_length == -1:
             max_seq_length = np.max([len(item) for item in pois])
 
         # Helper function to process each sequence based on the sampling method
@@ -118,7 +137,7 @@ class UserTrajectoryDataset(Dataset):
         ts, _ = zip(*processed_ts)
         ut, _ = zip(*processed_ut)
 
-        # Pad sequences to max_seq_length
+        # Pad sequences to the longest sequence length
         pois = pad_sequence(pois, batch_first=True, padding_value=0)
         pois_cat = pad_sequence(pois_cat, batch_first=True, padding_value=0)
         gh1 = pad_sequence(gh1, batch_first=True, padding_value=0)
@@ -131,11 +150,19 @@ class UserTrajectoryDataset(Dataset):
 
         users = torch.tensor(users)
 
-        # Prepare x and y for training with teacher forcing
-        ghs = list(x for x in [gh1, gh2, gh3] if x is not None)
+        ghs = list(item for item in [gh1, gh2, gh3] if item is not None)
 
+        
+        # During training the targets are shifted version of the input
+        # During test phase, the targets are unseen data.
         if train:
-            orig_lens = torch.tensor(pois_lens) - 1  # TODO check the correctness
+            # Prepare x and y for training with teacher forcing
+            # In some of the batches all of the sequences are shorter than max_seq_length
+            orig_lens = torch.tensor(pois_lens)
+            if not torch.any(orig_lens == max_seq_length):
+                max_seq_length = orig_lens.max().item() 
+            
+            orig_lens -= 1
             mask = torch.arange(max_seq_length - 1).expand(
                 len(orig_lens), max_seq_length - 1
             ) < orig_lens.unsqueeze(1)
@@ -151,9 +178,18 @@ class UserTrajectoryDataset(Dataset):
             return x, y, orig_lens
         else:
             orig_lens = torch.tensor(pois_lens)
+            # Input is the complete user trajectories
             x = (users, pois, pois_cat, *ghs, ts, ut)
-            t_users, t_pois, t_pois_cat, t_gh, _, _, t_ts, t_ut = zip(*test_batch)
-            y = (torch.tensor(t_users), torch.stack(t_pois))
+
+            tgt_ghs = list(
+                item for item in [tgt_gh1, tgt_gh2, tgt_gh3] if item is not None
+            )
+            y = (
+                torch.tensor(tgt_users),
+                torch.stack(tgt_pois),
+                torch.stack(tgt_pois_cat),
+                *[torch.stack(tgt_gh) for tgt_gh in tgt_ghs]
+            )
             return x, y, orig_lens
 
 
@@ -233,8 +269,8 @@ class FoursquareNYC(LightningDataModule):
     def setup(self, stage: str = None):
         # Split the dataset into train/val/test and assign to self variables
         self.dataset = UserTrajectoryDataset(
-            self.user_train_trajectories, self.user_test_trajectories
-        )
+                self.user_train_trajectories, self.user_test_trajectories
+            )
         if stage == "fit" or stage is None:
             self.train_dataset = self.dataset
             self.val_dataset = self.dataset
@@ -249,6 +285,7 @@ class FoursquareNYC(LightningDataModule):
             max_seq_length=self.max_traj_length,
             sampling_method=self.traj_sampling_method,
             geohash_precision=self.geohash_precision,
+            train=True
         )
         return DataLoader(
             self.train_dataset,
@@ -260,10 +297,9 @@ class FoursquareNYC(LightningDataModule):
         )
 
     def val_dataloader(self):
-        max_length = self.num_test_checkins
         collate_fn = partial(
             UserTrajectoryDataset.custom_collate,
-            max_seq_length=max_length,
+            max_seq_length=-1,
             sampling_method=self.traj_sampling_method,
             geohash_precision=self.geohash_precision,
             train=False,
@@ -278,10 +314,9 @@ class FoursquareNYC(LightningDataModule):
         )
 
     def test_dataloader(self):
-        max_length = self.num_test_checkins
         collate_fn = partial(
             UserTrajectoryDataset.custom_collate,
-            max_seq_length=max_length,
+            max_seq_length=-1,
             sampling_method=self.traj_sampling_method,
             geohash_precision=self.geohash_precision,
             train=False,
@@ -308,15 +343,14 @@ class FoursquareNYC(LightningDataModule):
         adj_mat = (geohash_vec[:, None] == geohash_vec).astype(np.int8)
         if not self.spatial_graph_self_loop:
             np.fill_diagonal(adj_mat, 0)  # Remove self-loops
-            
+
         print(f"Spatial graph sparsity: {self.get_sparsity(adj_mat)}")
         # Add empty row and column at position zero so later we can
         # retrieve the neighbors simply by POI ID
-        adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode='constant', constant_values=0)
-        
+        adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode="constant", constant_values=0)
+
         self.spatial_graph = torch.tensor(adj_mat)
         # self.spatial_graph = self.convert_to_sparse_tensor(adj_mat)
-        
 
     def _construct_temporal_graph(self):
         """
@@ -355,18 +389,19 @@ class FoursquareNYC(LightningDataModule):
         )
 
         # Step 3: Threshold the similarity to construct the adjacency matrix
-        adj_mat = (jaccard_similarity > self.temporal_graph_jaccard_sim_tsh).astype(np.int8)
+        adj_mat = (jaccard_similarity > self.temporal_graph_jaccard_sim_tsh).astype(
+            np.int8
+        )
         if not self.temporal_graph_self_loop:
             np.fill_diagonal(adj_mat, 0)  # Remove self-loops
 
         print(f"Temporal graph sparsity: {self.get_sparsity(adj_mat)}")
         # Add empty row and column at position zero so later we can
         # retrieve the neighbors simply by POI ID
-        adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode='constant', constant_values=0)
+        adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode="constant", constant_values=0)
         # Step 4: Convert to sparse tensor and store
         self.temporal_graph = torch.tensor(adj_mat)
         # self.temporal_graph = self.convert_to_sparse_tensor(adj_mat)
-        
 
     def _construct_hierarchical_spatial_graph(self):
         """
@@ -563,7 +598,7 @@ class FoursquareNYC(LightningDataModule):
 
             if not test_data.empty:
                 geohash_id_values = [
-                    train_data[id_key].tolist() for id_key in geohash_id_keys
+                    test_data[id_key].tolist() for id_key in geohash_id_keys
                 ]
                 geohash_key_values = {
                     key: value for key, value in zip(geohash_id_keys, geohash_id_values)

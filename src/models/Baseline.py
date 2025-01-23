@@ -83,7 +83,7 @@ class TrajLSTM(pl.LightningModule):
             inputs,
             lengths=orig_lengths.to("cpu"),
             batch_first=True,
-            enforce_sorted=False,  # or True if you're sure it's sorted
+            enforce_sorted=False,  # Since the sequences are not sorted
         )
 
         pck_output, _ = self.net(pck_inputs)
@@ -188,7 +188,7 @@ class TrajLSTM(pl.LightningModule):
         self.log("Val/Acc@10", acc10, on_epoch=True, reduce_fx="mean", prog_bar=True)
         self.log("Val/Acc@20", acc20, on_epoch=True, reduce_fx="mean", prog_bar=True)
         self.log("Val/MRR", mrr, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        
+
         return loss
 
     def test_step(self, batch, batch_idx): ...
