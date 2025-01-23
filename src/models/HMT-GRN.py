@@ -20,14 +20,14 @@ class HTM_GRN(pl.LightningModule):
         dataset: FoursquareNYC,
         user_emb_dim: int = 256,
         poi_emb_dim: int = 768,
-        poi_cat_emb_dim: int = 256,
+        poi_cat_emb_dim: int = 128,
         gh_emb_dim: int = 512,
         ts_emb_dim: int = 128,
         hidden_dim: int = 1024,
         emb_switch: List[bool] = [
             True,
             True,
-            True,
+            False,
             False,
         ],  # [user_emb, poi_emb, poi_cat_emb, ts_emb]
         num_lstm_layers: int = 1,
@@ -35,6 +35,7 @@ class HTM_GRN(pl.LightningModule):
         emb_dropout: float = 0.5,
         num_GAT_heads: int = 4,
         GAT_dropout: float = 0.0,
+        task_loss_coefficients: List[float] = [1, 1, 1, 1],
         optim_lr: float = 1e-4,
         optim_type: str = "adamw",
     ) -> None:
@@ -62,6 +63,12 @@ class HTM_GRN(pl.LightningModule):
             dataset.STATS[f"num_gh_P{precision}"] + 1  # index 0 is padding
             for precision in self.geohash_precision
         ]
+        
+        assert (
+            len(task_loss_coefficients) - 1 == len(self.geohash_precision)
+        ), "You should provide one coefficient for next POI prediction task and one for each next geohash prediction task."
+        
+        self.task_loss_coefficients = task_loss_coefficients
 
         self.user_emb_dim = user_emb_dim
         self.poi_emb_dim = poi_emb_dim
@@ -127,6 +134,10 @@ class HTM_GRN(pl.LightningModule):
             dropout=GAT_dropout,
             add_self_loops=False
         )
+        
+        self.attended_poi_projector = nn.Linear(
+            in_features=3*poi_emb_dim, out_features=poi_emb_dim
+        )
 
         self.net = nn.LSTM(
             input_size=self.aggregated_emb_dim,
@@ -136,7 +147,7 @@ class HTM_GRN(pl.LightningModule):
             dropout=lstm_dropout,
         )
 
-        self.POI_final_projector = nn.Linear(
+        self.poi_final_projector = nn.Linear(
             in_features=hidden_dim, out_features=self.num_pois
         )
         self.geohash_projectors = [
@@ -196,7 +207,8 @@ class HTM_GRN(pl.LightningModule):
         poi_cat_embs = self.poi_cat_emb(pois_cat) if self.emb_switch[2] else None
         ts_embs = self.ts_emb(ts) if self.emb_switch[3] else None
         gh_embs = [
-            self.gh_embeddings[idx](ghs[idx]) if ghs[idx] is not None else None
+            # self.gh_embeddings[idx](ghs[idx]) if ghs[idx] is not None else None
+            self.gh_embeddings[idx](ghs[idx])
             for idx in range(len(self.geohash_precision))
         ]
 
@@ -247,8 +259,8 @@ class HTM_GRN(pl.LightningModule):
                     temporal_edge_index = torch.cat([temporal_edge_index, tp_reversed_edges], dim=1)
                     temporal_edge_index = torch.cat([torch.tensor([[0], [0]]).to(POI.device), temporal_edge_index], dim=1)
                     
-                    POI_spatialy_attended = self.spatialGAT(POI_sp_nbs_embs, spatial_edge_index)[0]
-                    POI_temporally_attended = self.temporalGAT(POI_tmp_nbs_embs, temporal_edge_index)[0]
+                    POI_spatialy_attended = self.spatialGAT(POI_sp_nbs_embs, spatial_edge_index)[0].squeeze()
+                    POI_temporally_attended = self.temporalGAT(POI_tmp_nbs_embs, temporal_edge_index)[0].squeeze()
                     
                     spatially_attended_poi_embs[batch_index, seq_index] = POI_spatialy_attended
                     temporally_attended_poi_embs[batch_index, seq_index] = POI_temporally_attended
@@ -256,10 +268,13 @@ class HTM_GRN(pl.LightningModule):
                     spatially_attended_poi_embs[batch_index, seq_index] = POI_emb
                     temporally_attended_poi_embs[batch_index, seq_index] = POI_emb
 
-                    
+        
+        final_poi_emb = self.attended_poi_projector(
+            torch.cat([poi_embs, spatially_attended_poi_embs, temporally_attended_poi_embs], dim=-1)
+        )
                     
         lstm_inputs = torch.cat(
-            [poi_embs, user_embs], dim=-1
+            [final_poi_emb, user_embs], dim=-1
         )  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
         if poi_cat_embs:
             # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim)
@@ -270,7 +285,6 @@ class HTM_GRN(pl.LightningModule):
 
         inputs = self.emb_dropout(inputs)
                 
-
             
 
         pck_inputs = pack_padded_sequence(
@@ -286,10 +300,19 @@ class HTM_GRN(pl.LightningModule):
             pck_output, batch_first=True
         )  # shape (batch, seq_len, hidden_dim)
 
-        # out = torch.cat((lstm_out, self.emb_dropout(user_embs)), dim=2) # shape (bathc, seq_len, hidden_dim + user_emb_dim)
-        logits = self.out_projector(lstm_out)  # shape (batch, seq_len, num_poi)
+        poi_logits = self.poi_final_projector(lstm_out)
+        
+        gh_embs = [
+            self.emb_dropout(gh_emb) for gh_emb in gh_embs
+        ]
+        
+        ghs_logits = [
+            self.geohash_projectors(torch.cat([lstm_out, gh_embs[idx]], dim=-1))
+            for idx in range(len(self.geohash_precision)) 
+        ]
+        
 
-        return logits
+        return poi_logits, ghs_logits
 
     def training_step(self, batch, batch_idx):
         # Training step logic
@@ -305,14 +328,18 @@ class HTM_GRN(pl.LightningModule):
 
         # User ID shape [batch]
         # POIs, POIs Cat, Geohash Vectors, Time Slots, and Unix Timestamp shape [batch, seq_len]
+        # Target values are a shifted version of the `x` by one time step (teacher forcing)
         if len(self.geohash_precision) == 1:
             users, pois, pois_cat, gh1, ts, ut = x
-            gh2, gh3 = None, None
+            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1 = y
+            gh2, gh3, tgt_gh2, tgt_gh3 = None, None, None, None
         elif len(self.geohash_precision) == 2:
             users, pois, pois_cat, gh1, gh2, ts, ut = x
-            gh3 = None
+            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2 = y
+            gh3, tgt_gh3 = None
         elif len(self.geohash_precision) == 3:
             users, pois, pois_cat, gh1, gh2, gh3, ts, ut = x
+            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2, tgt_gh3 = y
         else:
             raise RuntimeError(
                 "The case for more than 3 geohash precisions in not handeled."
@@ -329,18 +356,32 @@ class HTM_GRN(pl.LightningModule):
         users = users.unsqueeze(1).repeat(1, seq_len)  # shape [batch, seq_len]
         users *= mask
 
-        logits = self.forward(
+        poi_logits, ghs_logits = self.forward(
             users, pois, pois_cat, [gh1, gh2, gh3], ts, ut, orig_lengths, mask
         )
 
-        logits = logits.view(-1, self.num_pois)
-        true_pois = y[1]  # shifted POIs (teacher forcing) shape [batch, seq_len]
-        true_pois = true_pois.reshape(-1)
+        poi_logits = poi_logits.view(-1, self.num_pois)
+        ghs_logits = [
+            ghs_logits[idx].view(-1, self.num_ghs[idx])
+            for idx in range(len(self.geohash_precision))
+        ]
 
-        loss = self.loss_fn(logits, true_pois)
+        poi_loss = self.loss_fn(poi_logits, tgt_pois.reshape(-1))
+        
+        tgt_ghs = [tgt_gh1, tgt_gh2, tgt_gh3]
+        gh_losses = [
+            self.loss_fn(ghs_logits[idx], tgt_ghs[idx].reshape(-1))
+            for idx in range(len(self.geohash_precision))
+        ]
+        
+        all_losses = [poi_loss, *gh_losses] * self.task_loss_coefficients
+        
+        total_loss = torch.sum(all_losses) / len(all_losses)
+        
+        return total_loss
 
-        self.log("Train/Loss", loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        return loss
+        # self.log("Train/Loss", loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
+        # return loss
 
     def validation_step(self, batch, batch_idx):
         # Validation step logic

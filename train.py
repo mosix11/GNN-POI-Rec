@@ -46,13 +46,12 @@ if __name__ == '__main__':
     
     ds = FoursquareNYC(batch_size=128)
 
-    model = TrajLSTM(num_user=ds.STATS['num_user'],
-                    num_pois=ds.STATS['num_pois'])
+    model = TrajLSTM(ds)
 
     tb_logger = TensorBoardLogger(log_dir, name="Baseline")
     
     trainer = Trainer(
-        max_epochs=1000,
+        max_epochs=400,
         accelerator="gpu",
         # devices=gpu.type,
         # log_every_n_steps=5,
