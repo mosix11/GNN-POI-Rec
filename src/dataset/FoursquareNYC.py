@@ -12,6 +12,7 @@ from pytorch_lightning import LightningDataModule
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 
 from torch_geometric.typing import SparseTensor
+from torch_geometric.utils import dense_to_sparse, add_self_loops
 
 from pathlib import Path
 
@@ -93,6 +94,22 @@ class UserTrajectoryDataset(Dataset):
             raise RuntimeError(
                 "The case for more than 3 geohash precisions in not handeled."
             )
+            
+        
+        # During the test phase we concatenate the target visits to the 
+        # training trajectory except the last visit since we are not going to
+        # predict any visit after the last visit.    
+        if not train:
+            pois = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(pois, tgt_pois))
+            pois_cat = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(pois_cat, tgt_pois_cat))
+            gh1 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh1, tgt_gh1))
+            if gh2 is not None:
+                gh2 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh2, tgt_gh2))
+            if gh3 is not None:
+                gh3 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh3, tgt_gh3))
+            ts = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(ts, tgt_ts))
+            ut = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(ut, tgt_ut))
+            
 
         # In the test phase we pad all sequences in the batch to the longest
         # sequence length in the batch since we don't want to remove any
@@ -152,7 +169,6 @@ class UserTrajectoryDataset(Dataset):
 
         ghs = list(item for item in [gh1, gh2, gh3] if item is not None)
 
-        
         # During training the targets are shifted version of the input
         # During test phase, the targets are unseen data.
         if train:
@@ -160,8 +176,8 @@ class UserTrajectoryDataset(Dataset):
             # In some of the batches all of the sequences are shorter than max_seq_length
             orig_lens = torch.tensor(pois_lens)
             if not torch.any(orig_lens == max_seq_length):
-                max_seq_length = orig_lens.max().item() 
-            
+                max_seq_length = orig_lens.max().item()
+
             orig_lens -= 1
             mask = torch.arange(max_seq_length - 1).expand(
                 len(orig_lens), max_seq_length - 1
@@ -188,7 +204,7 @@ class UserTrajectoryDataset(Dataset):
                 torch.tensor(tgt_users),
                 torch.stack(tgt_pois),
                 torch.stack(tgt_pois_cat),
-                *[torch.stack(tgt_gh) for tgt_gh in tgt_ghs]
+                *[torch.stack(tgt_gh) for tgt_gh in tgt_ghs],
             )
             return x, y, orig_lens
 
@@ -269,8 +285,8 @@ class FoursquareNYC(LightningDataModule):
     def setup(self, stage: str = None):
         # Split the dataset into train/val/test and assign to self variables
         self.dataset = UserTrajectoryDataset(
-                self.user_train_trajectories, self.user_test_trajectories
-            )
+            self.user_train_trajectories, self.user_test_trajectories
+        )
         if stage == "fit" or stage is None:
             self.train_dataset = self.dataset
             self.val_dataset = self.dataset
@@ -285,7 +301,7 @@ class FoursquareNYC(LightningDataModule):
             max_seq_length=self.max_traj_length,
             sampling_method=self.traj_sampling_method,
             geohash_precision=self.geohash_precision,
-            train=True
+            train=True,
         )
         return DataLoader(
             self.train_dataset,
@@ -329,6 +345,27 @@ class FoursquareNYC(LightningDataModule):
             pin_memory=True,
             num_workers=self.num_workers,
         )
+
+    def get_spatial_graph_edge_indices(self, self_loop=True):
+        edge_index, edge_attr = dense_to_sparse(self.spatial_graph)
+        if self_loop:
+            if not torch.diag(self.spatial_graph).sum() == self.STATS["num_pois"]:
+                print("Adding self loop to the Spatial adjacency matrix!")
+                edge_index, edge_attr = add_self_loops(
+                    edge_index, edge_attr=edge_attr, fill_value=1.0
+                )
+
+        return edge_index, edge_attr
+
+    def get_temporal_graph_edge_indices(self, self_loop=True):
+        edge_index, edge_attr = dense_to_sparse(self.temporal_graph)
+        if self_loop:
+            if not torch.diag(self.temporal_graph).sum() == self.STATS["num_pois"]:
+                print("Adding self loop to the Temporal adjacency matrix!")
+                edge_index, edge_attr = add_self_loops(
+                    edge_index, edge_attr=edge_attr, fill_value=1.0
+                )
+        return edge_index, edge_attr
 
     def _construct_spatial_graph(self):
         """
@@ -394,6 +431,8 @@ class FoursquareNYC(LightningDataModule):
         )
         if not self.temporal_graph_self_loop:
             np.fill_diagonal(adj_mat, 0)  # Remove self-loops
+        else:
+            np.fill_diagonal(adj_mat, 1)
 
         print(f"Temporal graph sparsity: {self.get_sparsity(adj_mat)}")
         # Add empty row and column at position zero so later we can
