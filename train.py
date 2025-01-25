@@ -55,7 +55,7 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("medium")
+    # torch.set_float32_matmul_precision("medium")
 
     cpu = nn_utils.get_cpu_device()
     gpu = nn_utils.get_gpu_device()

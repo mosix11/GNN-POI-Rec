@@ -380,9 +380,16 @@ class AverageMeter(object):
     """Computes and stores the average and current value (moving average)"""
 
     def __init__(self):
-        self.reset()
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
 
     def reset(self):
+        self.last_val = self.val
+        self.last_avg = self.avg
+        self.last_sum = self.sum
+        self.last_count = self.count
         self.val = 0
         self.avg = 0
         self.sum = 0

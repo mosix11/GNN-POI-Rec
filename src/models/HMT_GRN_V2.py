@@ -252,10 +252,10 @@ class HMT_GRN_V2(pl.LightningModule):
         lstm_inputs = torch.cat(
             [final_poi_emb, user_embs], dim=-1
         )  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
-        if poi_cat_embs:
+        if poi_cat_embs is not None:
             # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim)
             lstm_inputs = torch.cat([lstm_inputs, poi_cat_embs], dim=-1) 
-        if ts_embs:
+        if ts_embs is not None:
             # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim + ts_emb_dim)
             lstm_inputs = torch.cat([lstm_inputs, ts_embs], dim=-1) 
 
@@ -289,6 +289,7 @@ class HMT_GRN_V2(pl.LightningModule):
         
 
         return poi_logits, ghs_logits
+
 
     def training_step(self, batch, batch_idx):
         # Training step logic
