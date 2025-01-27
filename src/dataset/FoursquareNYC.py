@@ -2,14 +2,16 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from tabulate import tabulate
 
 from itertools import combinations
 from math import radians, sin, cos, sqrt, atan2, degrees
 
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from pytorch_lightning import LightningDataModule
 
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
+from .TrajectoryDataset import UserTrajectoryDataset
+
 
 from torch_geometric.typing import SparseTensor
 from torch_geometric.utils import dense_to_sparse, add_self_loops
@@ -20,205 +22,34 @@ from pathlib import Path
 import shutil
 from datetime import datetime, timedelta
 import geohash2 as geohash
-from typing import Union
+from typing import Union, List, Tuple
 from functools import partial
-import random
+
 
 from ..utils import misc_utils
 
 
-class UserTrajectoryDataset(Dataset):
-
-    def __init__(
-        self,
-        train_trajectories: pd.DataFrame,
-        test_trajectories: pd.DataFrame,
-    ) -> None:
-        super().__init__()
-
-        assert (
-            train_trajectories.shape[0] == test_trajectories.shape[0]
-        ), "For each traning user trajectory there must be one test trajectory."
-
-        train_trajectories = train_trajectories.drop(columns=["Local Time"])
-        test_trajectories = test_trajectories.drop(columns=["Local Time"])
-        self.train_trajectories = train_trajectories
-        self.test_trajectories = test_trajectories
-        self.columns = train_trajectories.columns.tolist()
-
-    def __len__(self):
-        return self.train_trajectories.shape[0]
-
-    def __getitem__(self, idx):
-        train_traj = self.train_trajectories.iloc[idx]
-        train_items = [torch.tensor(train_traj[col]) for col in self.columns]
-        test_traj = self.test_trajectories.iloc[idx]
-        test_items = [torch.tensor(test_traj[col]) for col in self.columns]
-        return train_items, test_items
-
-    @staticmethod
-    def custom_collate(
-        batch,
-        max_seq_length: int,
-        sampling_method: str,
-        geohash_precision: list,
-        train: bool = True,
-    ):
-        train_batch, test_batch = zip(*batch)
-
-        if len(geohash_precision) == 1:
-            users, pois, pois_cat, gh1, ts, ut = zip(*train_batch)
-            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_ts, tgt_ut = zip(
-                *test_batch
-            )
-            gh2, gh3, tgt_gh2, tgt_gh3 = None, None, None, None
-        elif len(geohash_precision) == 2:
-            users, pois, pois_cat, gh1, gh2, ts, ut = zip(*train_batch)
-            tgt_users, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2, tgt_ts, tgt_ut = zip(
-                *test_batch
-            )
-            gh3, tgt_gh3 = None
-        elif len(geohash_precision) == 3:
-            users, pois, pois_cat, gh1, gh2, gh3, ts, ut = zip(*train_batch)
-            (
-                tgt_users,
-                tgt_pois,
-                tgt_pois_cat,
-                tgt_gh1,
-                tgt_gh2,
-                tgt_gh3,
-                tgt_ts,
-                tgt_ut,
-            ) = zip(*test_batch)
-        else:
-            raise RuntimeError(
-                "The case for more than 3 geohash precisions in not handeled."
-            )
-            
-        
-        # During the test phase we concatenate the target visits to the 
-        # training trajectory except the last visit since we are not going to
-        # predict any visit after the last visit.    
-        if not train:
-            pois = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(pois, tgt_pois))
-            pois_cat = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(pois_cat, tgt_pois_cat))
-            gh1 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh1, tgt_gh1))
-            if gh2 is not None:
-                gh2 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh2, tgt_gh2))
-            if gh3 is not None:
-                gh3 = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(gh3, tgt_gh3))
-            ts = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(ts, tgt_ts))
-            ut = tuple(torch.cat([tr, tgt[:-1]], dim=0) for tr, tgt in zip(ut, tgt_ut))
-            
-
-        # In the test phase we pad all sequences in the batch to the longest
-        # sequence length in the batch since we don't want to remove any
-        # information.
-        if not train or max_seq_length == -1:
-            max_seq_length = np.max([len(item) for item in pois])
-
-        # Helper function to process each sequence based on the sampling method
-        def process_sequence(seq):
-            L = len(seq)
-            if L > max_seq_length:
-                if sampling_method == "window":
-                    # Sample a continuous interval of length max_seq_length
-                    start_idx = random.randint(0, L - max_seq_length)
-                    seq = seq[start_idx : start_idx + max_seq_length]
-                elif sampling_method == "random":
-                    # Sample max_seq_length indices randomly
-                    indices = sorted(random.sample(range(L), max_seq_length))
-                    seq = [seq[i] for i in indices]
-
-            if not isinstance(seq, torch.Tensor):
-                seq = torch.tensor(seq)
-            return seq, len(seq)
-
-        processed_pois = [process_sequence(seq) for seq in pois]
-        processed_pois_cat = [process_sequence(seq) for seq in pois_cat]
-        processed_gh1 = [process_sequence(seq) for seq in gh1]
-        if gh2:
-            processed_gh2 = [process_sequence(seq) for seq in gh2]
-        if gh3:
-            processed_gh3 = [process_sequence(seq) for seq in gh3]
-        processed_ts = [process_sequence(seq) for seq in ts]
-        processed_ut = [process_sequence(seq) for seq in ut]
-
-        pois, pois_lens = zip(*processed_pois)
-        pois_cat, _ = zip(*processed_pois_cat)
-        gh1, _ = zip(*processed_gh1)
-        if gh2:
-            gh2, _ = zip(*processed_gh2)
-        if gh3:
-            gh3, _ = zip(*processed_gh3)
-        ts, _ = zip(*processed_ts)
-        ut, _ = zip(*processed_ut)
-
-        # Pad sequences to the longest sequence length
-        pois = pad_sequence(pois, batch_first=True, padding_value=0)
-        pois_cat = pad_sequence(pois_cat, batch_first=True, padding_value=0)
-        gh1 = pad_sequence(gh1, batch_first=True, padding_value=0)
-        if gh2:
-            gh2 = pad_sequence(gh2, batch_first=True, padding_value=0)
-        if gh3:
-            gh3 = pad_sequence(gh3, batch_first=True, padding_value=0)
-        ts = pad_sequence(ts, batch_first=True, padding_value=0)
-        ut = pad_sequence(ut, batch_first=True, padding_value=0)
-
-        users = torch.tensor(users)
-
-        ghs = list(item for item in [gh1, gh2, gh3] if item is not None)
-
-        # During training the targets are shifted version of the input
-        # During test phase, the targets are unseen data.
-        if train:
-            # Prepare x and y for training with teacher forcing
-            # In some of the batches all of the sequences are shorter than max_seq_length
-            orig_lens = torch.tensor(pois_lens)
-            if not torch.any(orig_lens == max_seq_length):
-                max_seq_length = orig_lens.max().item()
-
-            orig_lens -= 1
-            mask = torch.arange(max_seq_length - 1).expand(
-                len(orig_lens), max_seq_length - 1
-            ) < orig_lens.unsqueeze(1)
-            x = (
-                users,
-                pois[:, :-1] * mask,
-                pois_cat[:, :-1] * mask,
-                *[gh_[:, :-1] * mask for gh_ in ghs],
-                ts[:, :-1] * mask,
-                ut[:, :-1] * mask,
-            )
-            y = (users, pois[:, 1:], pois_cat[:, 1:], *[gh_[:, 1:] for gh_ in ghs])
-            return x, y, orig_lens
-        else:
-            orig_lens = torch.tensor(pois_lens)
-            # Input is the complete user trajectories
-            x = (users, pois, pois_cat, *ghs, ts, ut)
-
-            tgt_ghs = list(
-                item for item in [tgt_gh1, tgt_gh2, tgt_gh3] if item is not None
-            )
-            y = (
-                torch.tensor(tgt_users),
-                torch.stack(tgt_pois),
-                torch.stack(tgt_pois_cat),
-                *[torch.stack(tgt_gh) for tgt_gh in tgt_ghs],
-            )
-            return x, y, orig_lens
 
 
 class FoursquareNYC(LightningDataModule):
+    """
+    This class is responsible for downloading, loading, filtering, and preprocessing the 
+    Foursqure NYC dataset. The class provides dataloader for training, validation, and
+    testing phases. Most of the operations are done according to the specifications in
+    this papaer: https://dl.acm.org/doi/pdf/10.1145/3477495.3531989
+    However since the datasets used in the experiments of this paper differs from NYC
+    dataset I change most of the hyperparameters.
+
+    """
     def __init__(
         self,
         data_dir: Path = Path("./data").absolute(),
         batch_size: int = 32,
         num_workers: int = 8,
-        user_checkin_tsh: int = (20, np.inf),
-        venue_checkin_tsh: int = (10, np.inf),
+        user_checkin_tsh: Tuple[int, int] = (20, np.inf),
+        venue_checkin_tsh: Tuple[int, int] = (10, np.inf),
         num_test_checkins: int = 6,
-        geohash_precision: list = [5, 6, 7],
+        geohash_precision: List[int] = [5, 6, 7],
         # geohash_precision: list = [6],
         max_traj_length: list = 64,
         traj_sampling_method: str = "window",
@@ -227,8 +58,41 @@ class FoursquareNYC(LightningDataModule):
         spatial_graph_self_loop: bool = False,
         spatial_graph_geohash_precision: int = 6,
         temporal_graph_self_loop: bool = False,
+        plot_stats: bool = False,
         seed: int = 11,
     ) -> None:
+        """
+        The `init` method carries out all the necessary operations needed for downloading,
+        loading, preprocessing, and plotting the statistics of the datset.
+        
+        Args:
+            `data_dir`: (Path): The directory to save and extract the downloaded dataset.
+            `batch_size`: (int): Batch size used by data loaders.
+            `num_workers`: (int): Number of workers used by data loaders.
+            `user_checkin_tsh` (Tuple[int, int]): 
+                The threshold used for clipping user trajectories.
+            `venue_checkin_tsh` (Tuple[int, int]): 
+                The threshold used for clipping poi trajectories.
+            `num_test_checkins` (int): Number of check-ins splited for testing.
+            `geohash_precision` (List[int]): Precision levels used for Geohash encoding.
+            `max_traj_length` (int): 
+                The length used to sliced tranjectories in batches during training.
+            `traj_sampling_method` (str):
+                The method used by collate function to sample sub trajectories during training.
+            `temporal_graph_jaccard_mult_set`(bool):
+                Whether to use set formulation of Jaccard similarity or multiset formulation.
+                In set formulation we neglect repetition while in multiset formulation we count
+                repetition of the items in the set. Note that there is no multiset formulation
+                of Jaccard similarity! I just made up one version to see if it works better!
+            `temporal_graph_jaccard_sim_tsh` (float):
+                The cut off threshold of Jaccard similarity used to construct edges in 
+                temporal graph.
+            `spatial_graph_self_loop` (bool): Whether to add self loop to Spatial Graph.
+            `temporal_graph_self_loop` (bool): Whether to add self loop to Temporal Graph.
+            `plot_stats` (bool): 
+                Wether to plot datset stast usign matplotlob or do simple logging.
+        
+        """
 
         super().__init__()
 
@@ -271,6 +135,8 @@ class FoursquareNYC(LightningDataModule):
         self.spatial_graph_geohash_precision = spatial_graph_geohash_precision
         self.temporal_graph_self_loop = temporal_graph_self_loop
 
+        self.plot_stats = plot_stats
+
         self._download_dataset()
         self._load_data()
         self._preprocess_data()
@@ -293,8 +159,6 @@ class FoursquareNYC(LightningDataModule):
             self.val_dataset = self.dataset
         if stage == "test" or stage is None:
             self.test_dataset = self.dataset
-        # if stage == 'predict' or stage is None:
-        #     self.predict_dataset = ...
 
     def train_dataloader(self):
         collate_fn = partial(
@@ -347,7 +211,18 @@ class FoursquareNYC(LightningDataModule):
             num_workers=self.num_workers,
         )
 
-    def get_spatial_graph_edge_indices(self, self_loop=True):
+    def get_spatial_graph_edge_indices(
+        self, self_loop=True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        This method constructs the edge indices matrix in COO format using the
+        adjacency matrix of the Spatial Graph.
+
+        Args:
+            `self_loop`: Whether to add self loop to the edge list or not.
+        Returns:
+            Tuple[Tensor, Tensor]: edge indices and attributes.
+        """
         edge_index, edge_attr = dense_to_sparse(self.spatial_graph)
         if self_loop:
             if not torch.diag(self.spatial_graph).sum() == self.STATS["num_pois"]:
@@ -358,7 +233,18 @@ class FoursquareNYC(LightningDataModule):
 
         return edge_index, edge_attr
 
-    def get_temporal_graph_edge_indices(self, self_loop=True):
+    def get_temporal_graph_edge_indices(
+        self, self_loop=True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        This method constructs the edge indices matrix in COO format using the
+        adjacency matrix of the Temporal Graph.
+
+        Args:
+            `self_loop`: Whether to add self loop to the edge list or not.
+        Returns:
+            Tuple[Tensor, Tensor]: edge indices and attributes.
+        """
         edge_index, edge_attr = dense_to_sparse(self.temporal_graph)
         if self_loop:
             if not torch.diag(self.temporal_graph).sum() == self.STATS["num_pois"]:
@@ -388,7 +274,6 @@ class FoursquareNYC(LightningDataModule):
         adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode="constant", constant_values=0)
 
         self.spatial_graph = torch.tensor(adj_mat)
-        # self.spatial_graph = self.convert_to_sparse_tensor(adj_mat)
 
     def _construct_temporal_graph(self):
         """
@@ -418,7 +303,7 @@ class FoursquareNYC(LightningDataModule):
             row_sums = M_binary.sum(axis=1)  # Count of unique time slots for each venue
             union = row_sums[:, None] + row_sums[None, :] - intersection
 
-        # Step 2: Compute Jaccard Similarity
+        # Compute Jaccard Similarity
         jaccard_similarity = np.divide(
             intersection,
             union,
@@ -426,7 +311,7 @@ class FoursquareNYC(LightningDataModule):
             where=union != 0,
         )
 
-        # Step 3: Threshold the similarity to construct the adjacency matrix
+        # Threshold the similarity to construct the adjacency matrix
         adj_mat = (jaccard_similarity > self.temporal_graph_jaccard_sim_tsh).astype(
             np.int8
         )
@@ -439,9 +324,8 @@ class FoursquareNYC(LightningDataModule):
         # Add empty row and column at position zero so later we can
         # retrieve the neighbors simply by POI ID
         adj_mat = np.pad(adj_mat, ((1, 0), (1, 0)), mode="constant", constant_values=0)
-        # Step 4: Convert to sparse tensor and store
+        # Convert to sparse tensor and store
         self.temporal_graph = torch.tensor(adj_mat)
-        # self.temporal_graph = self.convert_to_sparse_tensor(adj_mat)
 
     def _construct_hierarchical_spatial_graph(self):
         """
@@ -478,7 +362,6 @@ class FoursquareNYC(LightningDataModule):
         self.hierarchical_spatial_graph = graph
 
     def _preprocess_data(self):
-
         self.df = self.df.drop_duplicates()
 
         print("Dateset statistics before filtering:")
@@ -491,34 +374,42 @@ class FoursquareNYC(LightningDataModule):
 
         df_flt = self._reassign_IDs(df_flt)
 
-        # distances = self._calculate_discrepancy_in_locations(df_flt)
-        # i = 0
-        # for venue, distance in distances:
-        #     print(venue, distance)
-        #     i += 1
-        #     if i == 5:
-        #         break
-        # i = 0
-        # for venue, distance in distances:
-        #     if distance > 100.0:
-        #         i+=1
-        # print('num venues with more than 200 min check-ins', i)
+        if self.plot_stats:
+            unique_vens_locs_counts = df_flt.groupby("Venue ID")[
+                ["Latitude", "Longitude"]
+            ].apply(lambda group: group.drop_duplicates().shape[0])
+            values, frequencies = np.unique(unique_vens_locs_counts, return_counts=True)
+            plt.figure(figsize=(8, 5))
+            plt.bar(values, frequencies, width=0.8, edgecolor="black", alpha=0.7)
+            plt.xlabel("Number of Locations Associated to a Venue")
+            plt.ylabel("Frequency")
+            plt.title("Distribution of Number of Different Locations for Venues")
+            plt.xticks(
+                np.arange(0, unique_vens_locs_counts.max() + 1)
+            )  # Tick marks on integers
+            plt.yscale("log")
+            plt.grid(axis="y", linestyle="--", alpha=0.7)
+            plt.show()
+        if self.plot_stats:
+            distances = self._calculate_discrepancy_in_locations(df_flt)
+            ids, distance_values = zip(*distances)
+            distance_values = list(filter(lambda x: x != 0, distance_values))
+            x_values = range(1, len(distance_values) + 1)
+            plt.figure(figsize=(8, 5))
+            plt.plot(
+                x_values, distance_values, linestyle="-", label="Distance (meters)"
+            )
+            plt.xlabel("Sorted Venues")
+            plt.ylabel("Distance in Meters")
+            plt.title(
+                "Distance Between Farthest Pair of Locations for Venues with Multiple Locations"
+            )
+            plt.yscale("log")
+            plt.grid(axis="y", linestyle="--", alpha=0.7)
+            plt.show()
 
+        # We replace the location of venues with more than one location with the average location
         df_flt = self._replace_locations_with_average(df_flt)
-
-        # distances = self._calculate_discrepancy_in_locations(df_flt)
-        # i = 0
-        # for venue, distance in distances:
-        #     print(venue, distance)
-        #     i += 1
-        #     if i == 5:
-        #         break
-        # i = 0
-        # for venue, distance in distances:
-        #     if distance > 100.0:
-        #         i+=1
-
-        # print('num venues with more than 200 min check-ins', i)
 
         self.STATS = {
             "num_user": df_flt["User ID"].nunique(),
@@ -528,6 +419,19 @@ class FoursquareNYC(LightningDataModule):
         }
 
         df_flt = self._process_time(df_flt)
+        if self.plot_stats:
+            value_counts = df_flt["Time Slot"].value_counts().sort_index()
+            plt.figure(figsize=(8, 5))
+            plt.bar(
+                value_counts.index, value_counts.values, width=0.8, edgecolor="black"
+            )
+            plt.xlabel("Time Slot")
+            plt.ylabel("Frequency")
+            plt.title("Distribution of Time Slot Values", fontsize=14)
+            plt.xticks(range(1, 57), fontsize=5)
+            plt.grid(axis="y", linestyle="--", alpha=0.7)
+            plt.show()
+
         df_flt = self._process_location(df_flt)
 
         gh_id_keys = [f"Geohash P{prc} ID" for prc in self.geohash_precision]
@@ -547,43 +451,39 @@ class FoursquareNYC(LightningDataModule):
 
         # issues = self._check_geohash_consistency(df_flt)
         # print(self.STATS)
-        # exit()
 
-        # user_trajectories, poi_trajectories = self._from_trajectories(df_flt)
         user_train_trajectories, user_test_trajectories, poi_trajectories = (
             self._from_trajectories_with_split(df_flt, self.num_test_checkins)
         )
 
-        # # Compute the lengths of the lists in the 'User ID' column
-        # lengths = poi_trajectories['User ID'].apply(len)
-
-        # # Calculate the minimum, maximum, and average length
-        # min_length = lengths.min()
-        # max_length = lengths.max()
-        # average_length = lengths.mean()
-
-        # print(f"Minimum length: {min_length}")
-        # print(f"Maximum length: {max_length}")
-        # print(f"Average length: {average_length}")
-
-        # print(df_flt['Geohash ID'])
-        # print(df_flt['Time Slot'].min(), df_flt['Time Slot'].max())
-
-        # print(user_trajectories.shape)
-        # print(user_trajectories.iloc[0])
-
-        # print(poi_trajectories.shape)
-        # print(poi_trajectories.head())
-        # print(poi_trajectories.iloc[0])
-        # print(user_trajectories.head()['Geohash ID'])
-
-        # print(self.search_user_venue_visits(user_trajectories, 48, 4))
-
         self.df_preprocessed = df_flt
         self.user_train_trajectories = user_train_trajectories
         self.user_test_trajectories = user_test_trajectories
-        # self.user_trajectories = user_trajectories
         self.poi_trajectories = poi_trajectories
+
+        if self.plot_stats:
+            col_titles = ["Users", "POIs", "POI Categories", "Test Check-ins"]
+            for prc in self.geohash_precision:
+                col_titles.append(f"Geohash P{prc}")
+
+            row_titles = ["Count"]
+            tbl_data = [
+                [
+                    self.STATS["num_user"],
+                    self.STATS["num_pois"],
+                    self.STATS["num_poi_cat"],
+                    self.num_test_checkins,
+                ]
+            ]
+            for mkey in stats_gh_keys:
+                tbl_data[0].append(self.STATS[mkey])
+            misc_utils.plot_plt_table(
+                main_title="Final Preprocessed Data Stats",
+                column_titles=col_titles,
+                row_titles=row_titles,
+                data=tbl_data,
+            )
+
         # memory_usage = self.df_preprocessed.memory_usage(deep=True).sum()
         # print(f"The DataFrame is using {memory_usage / 1024:.2f} KB in memory.")
 
@@ -732,6 +632,7 @@ class FoursquareNYC(LightningDataModule):
         return issues
 
     def _process_time(self, df: pd.DataFrame):
+        """ """
 
         def calculate_local_time(utc_time, timezone_offset):
             # Parse the UTC time string
@@ -760,9 +661,6 @@ class FoursquareNYC(LightningDataModule):
         )
         df["Unix Timestamp"] = df["Local Time"].apply(lambda x: int(x.timestamp()))
         df = local_time_to_week_slot(df)
-        # min_timestamp = df['Unix Timestamp'].min()
-        # max_timestamp = df['Unix Timestamp'].max()
-        # df['Normalized Timestamp'] = (df['Unix Timestamp'] - min_timestamp) / (max_timestamp - min_timestamp)
         df = df.sort_values(by=["User ID", "Unix Timestamp"])
         df = df.drop(columns=["Timezone Offset", "UTC Time"])
 
@@ -796,8 +694,7 @@ class FoursquareNYC(LightningDataModule):
     def _filter_user_venue(self, df: pd.DataFrame):
         num_user_checkins = df["User ID"].value_counts()
         num_venue_checkins = df["Venue ID"].value_counts()
-        # num_venue_users = self.df.groupby("Venue ID")["User ID"].nunique()
-        # venues_with_enough_users = num_venue_users[(num_venue_users >= self.venue_checkin_ths[0]) & (num_venue_users <= self.venue_checkin_ths[1])].index
+
         venues_with_enough_users = num_venue_checkins[
             (num_venue_checkins >= self.venue_checkin_ths[0])
             & (num_venue_checkins <= self.venue_checkin_ths[1])
@@ -820,22 +717,62 @@ class FoursquareNYC(LightningDataModule):
             self.raw_file_path, sep="\t", encoding="latin-1", names=self.DF_COLUMNS
         )
         self.df = df.sort_values(by=["User ID"])
-        # column_null_counts = df.isnull().sum()  # Count of 'null' values in each column
-        # print(f"Number of rows: {df.shape[0]} | Number of columns: {df.shape[1]} ")
-        # print("\nSummary of 'null' values in each column:")
-        # print(column_null_counts)
 
     def _log_stats(self, df: pd.DataFrame):
         num_user_checkins = df["User ID"].value_counts()
         num_venue_checkins = df["Venue ID"].value_counts()
-        print(f"Number of records: {df.shape[0]}")
-        print(
-            f"Number of users: {df['User ID'].nunique()}, with min = {num_user_checkins.min()}, max = {num_user_checkins.max()}, and avg: {num_user_checkins.mean()}"
-        )
-        print(
-            f"Number of venues: {df['Venue ID'].nunique()}, with min = {num_venue_checkins.min()}, max = {num_venue_checkins.max()}, and avg: {num_venue_checkins.mean()}"
-        )
-        print(f"Number of venue categories: {df['Venue Category ID'].nunique()}")
+        if not self.plot_stats:
+            print(f"Number of records: {df.shape[0]}")
+            print(
+                f"Number of users: {df['User ID'].nunique()}, with min = {num_user_checkins.min()}, max = {num_user_checkins.max()}, and avg: {num_user_checkins.mean()}"
+            )
+            print(
+                f"Number of venues: {df['Venue ID'].nunique()}, with min = {num_venue_checkins.min()}, max = {num_venue_checkins.max()}, and avg: {num_venue_checkins.mean()}"
+            )
+            print(f"Number of venue categories: {df['Venue Category ID'].nunique()}")
+
+        else:
+            col_titles = ["Count", "Min Check-in", "Average Check-in", "Max Check-in"]
+            row_titles = ["Users", "Venues", "Venue Ctg", "Total Records"]
+            tbl_data = [
+                [
+                    df["User ID"].nunique(),
+                    num_user_checkins.min(),
+                    num_user_checkins.mean(),
+                    num_user_checkins.max(),
+                ],
+                [
+                    df["Venue ID"].nunique(),
+                    num_venue_checkins.min(),
+                    num_venue_checkins.mean(),
+                    num_venue_checkins.max(),
+                ],
+                [df.shape[0], 0, 0, 0],
+                [df.shape[0], 0, 0, 0]
+            ]
+            misc_utils.plot_plt_table(
+                main_title="Records Stats",
+                column_titles=col_titles,
+                row_titles=row_titles,
+                data=tbl_data,
+            )
+
+            # Plot distributions of user and venue check-ins
+            fig, axes = plt.subplots(1, 2, figsize=(8, 3), sharey=False)
+            axes[0].hist(num_user_checkins, bins=100, color="blue", edgecolor="black")
+            axes[0].set_title("Distribution of User Check-ins")
+            axes[0].set_xlabel("Check-in Counts")
+            axes[0].set_ylabel("Frequency")
+            axes[0].set_xlim(left=0)
+            axes[1].hist(num_venue_checkins, bins=100, color="green", edgecolor="black")
+            axes[1].set_title("Distribution of Venue Check-ins")
+            axes[1].set_xlabel("Check-in Counts")
+            axes[1].set_ylabel("Frequency")
+            axes[1].set_xlim(left=0)
+            axes[1].set_yscale("log")
+
+            plt.tight_layout()
+            plt.show()
 
     def _download_dataset(self):
         zip_file_path = self.FNYC_dir.joinpath(Path("dataset.zip"))

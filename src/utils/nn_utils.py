@@ -7,17 +7,19 @@ import collections
 from . import misc_utils
 from torch.utils.data import Dataset
 from typing import Any
-# from sklearn.metrics import confusion_matrix
+
 
 def get_gpu_device():
     if torch.cuda.is_available():
-        return torch.device('cuda')
+        return torch.device("cuda")
     elif torch.backends.mps.is_available():
-        return torch.device('mps')
-    else : return None
-    
+        return torch.device("mps")
+    else:
+        return None
+
+
 def get_cpu_device():
-    return torch.device('cpu')
+    return torch.device("cpu")
 
 
 class ClassifierMetrics:
@@ -58,6 +60,7 @@ class ClassifierMetrics:
         rec = self.recall()
         return 2 * (prec * rec) / (prec + rec + 1e-10)
 
+
 # class ConfusionMatrixTracker:
 #     def __init__(self, num_classes):
 #         self.num_classes = num_classes
@@ -69,10 +72,10 @@ class ClassifierMetrics:
 #         predicted_labels_np = predicted_labels.detach().cpu().numpy()
 #         if len(true_labels_np.shape) > 1 : true_labels_np.squeeze()
 #         if len(predicted_labels_np.shape) > 1 : predicted_labels_np.squeeze()
-        
+
 #         # Compute the confusion matrix for the current batch
 #         batch_conf_matrix = confusion_matrix(true_labels_np, predicted_labels_np, labels=range(self.num_classes))
-        
+
 #         # Convert numpy confusion matrix to a torch tensor and update the overall confusion matrix
 #         self.confusion_matrix += torch.tensor(batch_conf_matrix, dtype=torch.int32)
 
@@ -82,41 +85,39 @@ class ClassifierMetrics:
 #     def get_confusion_matrix(self):
 #         return self.confusion_matrix
 
-class DataModule():
 
-    def __init__(self, root='./data/', num_workers=8) -> None:
-        
+class DataModule:
+
+    def __init__(self, root="./data/", num_workers=8) -> None:
+
         if not os.path.exists(root):
             os.mkdir(root)
         self.root = root
         self.num_workers = num_workers
 
-    
     def get_dataloader(self, train=True):
         pass
 
-
     def train_dataloader(self):
         return self.get_dataloader(train=True)
-    
 
     def val_dataloader(self):
         return self.get_dataloader(train=False)
 
 
 class SimpleListDataset(Dataset):
-    
-    def __init__(self, data_list:list) -> None:
+
+    def __init__(self, data_list: list) -> None:
         super().__init__()
         self.data_list = data_list
-        
+
     def __getitem__(self, index) -> Any:
         return self.data_list[index]
-    
+
     def __len__(self) -> int:
         return len(self.data_list)
-    
-    
+
+
 def init_constant(module, const):
     if type(module) == nn.Linear:
         nn.init.constant_(module.weight, const)
@@ -124,6 +125,7 @@ def init_constant(module, const):
     if type(module) == nn.Conv2d:
         nn.init.constant_(module.weight, const)
         nn.init.zeros_(module.bias)
+
 
 def init_uniform(module, l=0, u=1):
     if type(module) == nn.Linear:
@@ -133,6 +135,7 @@ def init_uniform(module, l=0, u=1):
         nn.init.uniform_(module.weight, a=l, b=u)
         nn.init.zeros_(module.bias)
 
+
 def init_normal(module, mean=0, std=0.01):
     if type(module) == nn.Linear:
         nn.init.normal_(module.weight, mean=mean, std=std)
@@ -140,6 +143,7 @@ def init_normal(module, mean=0, std=0.01):
     if type(module) == nn.Conv2d:
         nn.init.normal_(module.weight, mean=mean, std=std)
         nn.init.zeros_(module.bias)
+
 
 def init_xavier_uniform(module, gain=1):
     if type(module) == nn.Linear:
@@ -153,6 +157,7 @@ def init_xavier_uniform(module, gain=1):
             if "weight" in param:
                 nn.init.xavier_uniform_(module._parameters[param])
 
+
 def init_xavier_normal(module, gain=1):
     if type(module) == nn.Linear:
         nn.init.xavier_normal_(module.weight, gain=gain)
@@ -164,7 +169,7 @@ def init_xavier_normal(module, gain=1):
         for param in module._flat_weights_names:
             if "weight" in param:
                 nn.init.xavier_normal_(module._parameters[param])
-    
+
 
 def lazy_layer_initialization(model, dummy_input, init_method=None):
     model(*dummy_input)
@@ -174,13 +179,16 @@ def lazy_layer_initialization(model, dummy_input, init_method=None):
 
 def masked_softmax(X, valid_lens):
     """Perform softmax operation by masking elements on the last axis."""
-    # X: 3D tensor, valid_lens: 1D or 2D tensor 
-    # 1D valid_lens specifies valid length for each batch However the 2d valid_lens specifies valid lengths also 
+
+    # X: 3D tensor, valid_lens: 1D or 2D tensor
+    # 1D valid_lens specifies valid length for each batch However the 2d valid_lens specifies valid lengths also
     # for each sample in each batch aswell meaning samples in the same batch can have different lengths.
     def _sequence_mask(X, valid_len, value=0):
         maxlen = X.size(1)
-        mask = torch.arange((maxlen), dtype=torch.float32,
-                            device=X.device)[None, :] < valid_len[:, None]
+        mask = (
+            torch.arange((maxlen), dtype=torch.float32, device=X.device)[None, :]
+            < valid_len[:, None]
+        )
         X[~mask] = value
         return X
 
@@ -198,10 +206,8 @@ def masked_softmax(X, valid_lens):
         return nn.functional.softmax(X.reshape(shape), dim=-1)
 
 
-
-
 def calculate_ouput_dim(net, input_dim=None):
-    
+
     batch_size = 8
     for child in net.children():
         if isinstance(child, nn.Sequential):
@@ -209,7 +215,7 @@ def calculate_ouput_dim(net, input_dim=None):
         for layer in child.modules():
             if isinstance(layer, nn.Sequential):
                 layer = layer[0]
-            
+
             if isinstance(layer, nn.Linear):
                 (W_1, in_size) = list(net.parameters())[0].shape
                 dummy_input = torch.randn((batch_size, in_size))
@@ -218,25 +224,30 @@ def calculate_ouput_dim(net, input_dim=None):
                 (K, in_C, K_h, K_w) = list(net.parameters())[0].shape
                 if input_dim == None:
                     dummy_input = torch.randn(batch_size, in_C, 1024, 1024)
-                    print('Since the input dimension was not specified the default input size was set to be (1024, 1024)')
+                    print(
+                        "Since the input dimension was not specified the default input size was set to be (1024, 1024)"
+                    )
                 else:
                     if input_dim[0] != in_C:
-                        error_str = 'input channels {} doesnt match the input channel size of network {}'.format(input_dim[0], in_C)
+                        error_str = "input channels {} doesnt match the input channel size of network {}".format(
+                            input_dim[0], in_C
+                        )
                         raise Exception(error_str)
-                    dummy_input = torch.randn(batch_size, in_C, input_dim[1], input_dim[2])
-                
+                    dummy_input = torch.randn(
+                        batch_size, in_C, input_dim[1], input_dim[2]
+                    )
+
                 output = net(dummy_input)
             break
         break
-    
-    return output.shape
 
+    return output.shape
 
 
 def cosine_warmup_lr(epoch, base_lr, warmup_epochs, total_epochs):
     """
     Compute learning rate with a linear warmup followed by cosine decay.
-    
+
     Args:
         epoch (int): Current epoch.
         base_lr (float): Base learning rate.
@@ -252,6 +263,7 @@ def cosine_warmup_lr(epoch, base_lr, warmup_epochs, total_epochs):
         # Cosine decay after warmup
         progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
         return 0.5 * base_lr * (1 + np.cos(np.pi * progress))
+
 
 def exponential_warmup_lr(epoch, base_lr, warmup_epochs):
     """
@@ -269,6 +281,7 @@ def exponential_warmup_lr(epoch, base_lr, warmup_epochs):
         return base_lr * (np.exp(epoch / warmup_epochs) - 1) / (np.e - 1)
     return base_lr
 
+
 def linear_warmup_lr(epoch, base_lr, warmup_epochs):
     """
     Compute learning rate with linear warmup.
@@ -284,11 +297,21 @@ def linear_warmup_lr(epoch, base_lr, warmup_epochs):
     if epoch < warmup_epochs:
         return base_lr * (epoch + 1) / warmup_epochs
     return base_lr
-    
-    
+
+
 from torch.optim.lr_scheduler import _LRScheduler
+
+
 class CustomWarmupLRScheduler(_LRScheduler):
-    def __init__(self, optimizer, base_scheduler, warmup_strategy="lin", warmup_epochs=10, total_epochs=100, last_epoch=-1):
+    def __init__(
+        self,
+        optimizer,
+        base_scheduler,
+        warmup_strategy="lin",
+        warmup_epochs=10,
+        total_epochs=100,
+        last_epoch=-1,
+    ):
         """
         Custom learning rate scheduler with warm-up strategies and integration with a PyTorch scheduler.
 
@@ -308,7 +331,9 @@ class CustomWarmupLRScheduler(_LRScheduler):
 
     def _get_warmup_lr(self, epoch, base_lr):
         if self.warmup_strategy == "cos":
-            return cosine_warmup_lr(epoch, base_lr, self.warmup_epochs, self.total_epochs)
+            return cosine_warmup_lr(
+                epoch, base_lr, self.warmup_epochs, self.total_epochs
+            )
         elif self.warmup_strategy == "exp":
             return exponential_warmup_lr(epoch, base_lr, self.warmup_epochs)
         else:  # Default to linear warm-up
@@ -325,15 +350,20 @@ class CustomWarmupLRScheduler(_LRScheduler):
     def step(self, epoch=None):
         super(CustomWarmupLRScheduler, self).step(epoch)
         if self.last_epoch >= self.warmup_epochs:
-            self.base_scheduler.step(epoch - self.warmup_epochs if epoch is not None else None)
-    
+            self.base_scheduler.step(
+                epoch - self.warmup_epochs if epoch is not None else None
+            )
+
+
 def compute_grad_norm_stats(model):
     # Collect all gradient norms
     grad_norms = []
     for param in model.parameters():
         if param.grad is not None:  # Ensure the parameter has a gradient
-            grad_norms.append(param.grad.norm(2).item())  # Compute the L2 norm of the gradient
-    
+            grad_norms.append(
+                param.grad.norm(2).item()
+            )  # Compute the L2 norm of the gradient
+
     if grad_norms:
         max_grad_norm = max(grad_norms)  # Maximum gradient norm
         avg_grad_norm = sum(grad_norms) / len(grad_norms)  # Average gradient norm
