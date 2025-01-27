@@ -219,6 +219,7 @@ class FoursquareNYC(LightningDataModule):
         venue_checkin_tsh: int = (10, np.inf),
         num_test_checkins: int = 6,
         geohash_precision: list = [5, 6, 7],
+        # geohash_precision: list = [6],
         max_traj_length: list = 64,
         traj_sampling_method: str = "window",
         temporal_graph_jaccard_mult_set: bool = True,

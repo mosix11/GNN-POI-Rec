@@ -4,8 +4,12 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 import pytorch_lightning as pl
 
+from tabulate import tabulate
+
 from ..metrics import MRR, AccuracyK
 from ..dataset import FoursquareNYC
+
+from ..utils import misc_utils
 
 
 class TrajLSTM(pl.LightningModule):
@@ -29,7 +33,7 @@ class TrajLSTM(pl.LightningModule):
 
         self.num_user = num_user
         self.user_emb_dim = user_emb_dim
-        self.num_poi = num_pois
+        self.num_pois = num_pois
         self.poi_emb_dim = poi_emb_dim
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -57,11 +61,19 @@ class TrajLSTM(pl.LightningModule):
         self.out_projector = nn.Linear(in_features=hidden_dim, out_features=num_pois)
 
         self.loss_fn = nn.CrossEntropyLoss(ignore_index=0)
+
         self.acc1 = AccuracyK(1)
         self.acc5 = AccuracyK(5)
         self.acc10 = AccuracyK(10)
         self.acc20 = AccuracyK(20)
         self.mrr = MRR()
+
+        self.poi_loss_avg = misc_utils.AverageMeter()
+        self.acc1_avg = misc_utils.AverageMeter()
+        self.acc5_avg = misc_utils.AverageMeter()
+        self.acc10_avg = misc_utils.AverageMeter()
+        self.acc20_avg = misc_utils.AverageMeter()
+        self.mrr_avg = misc_utils.AverageMeter()
 
     def forward(self, user_ids, pois, orig_lengths):
         """
@@ -123,14 +135,30 @@ class TrajLSTM(pl.LightningModule):
 
         logits = self.forward(user_ids, pois, orig_lengths)
 
-        logits = logits.view(-1, self.num_poi)
+        logits = logits.view(-1, self.num_pois)
         true_pois = y[1]  # shifted POIs (teacher forcing) shape [batch, seq_len]
         true_pois = true_pois.reshape(-1)
 
         loss = self.loss_fn(logits, true_pois)
 
-        self.log("Train/Loss", loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
+        self.poi_loss_avg.update(loss.detach().cpu().item())
+
         return loss
+
+    def on_train_batch_start(self, batch, batch_idx):
+        self.poi_loss_avg.reset()
+        self.logger.experiment.add_scalar(
+            "Learning Rate",
+            self.optimizers(use_pl_optimizer=False).param_groups[0]["lr"],
+            self.current_epoch,
+        )
+        return super().on_train_batch_start(batch, batch_idx)
+
+    def on_train_epoch_end(self):
+        self.logger.experiment.add_scalar(
+            "Train/POI Loss", self.poi_loss_avg.avg, self.current_epoch
+        )
+        return super().on_train_epoch_end()
 
     def validation_step(self, batch, batch_idx):
         # Validation step logic
@@ -145,7 +173,7 @@ class TrajLSTM(pl.LightningModule):
 
         ** The collate function pads the sequences in the batch to maximum length for testing.
         ** In each validation step the model only predicts the first element in the test samples
-        ** Full testing for all test samples will be don after training is finished (refer to evaluate method)
+        ** Full testing for all test samples will be done after training is finished (refer to test_step method)
 
         """
         x, y, orig_lengths = batch
@@ -153,7 +181,11 @@ class TrajLSTM(pl.LightningModule):
             x[0],
             x[1],
         )  # User ID shape [batch], POIs shape [batch, seq_len]
+        tgt_pois = y[1]
+
+        batch_size = pois.shape[0]
         seq_len = pois.size(1)
+        target_seq_len = tgt_pois.size(1)
 
         mask = torch.arange(seq_len, device=user_ids.device).expand(
             len(orig_lengths), seq_len
@@ -161,37 +193,161 @@ class TrajLSTM(pl.LightningModule):
         user_ids = user_ids.unsqueeze(1).repeat(1, seq_len)  # shape [batch, seq_len]
         user_ids *= mask
 
-        logits = self.forward(
+        poi_logits = self.forward(
             user_ids, pois, orig_lengths
         )  # shape (batch, seq_len, num_poi)
 
-        last_valid_indices = orig_lengths - 1
-        batch_indices = torch.arange(logits.size(0), device=user_ids.device)
-        last_logit = logits[
-            batch_indices, last_valid_indices, :
-        ]  # shape (batch, num_poi)
+        last_train_indices = orig_lengths - target_seq_len
 
-        true_pois = y[1][:, 0]  # take the first POI in the test check-ins shape (batch)
-        true_pois = true_pois.reshape(-1)
+        # Here we extract the logits of the last check-in in traning trajectory
+        # This logit is used to predict the first check-in in the test check-ins.
+        tgt_poi_logits = torch.stack(
+            [
+                poi_logits[i, last_train_indices[i] : last_train_indices[i] + 1, :]
+                for i in range(batch_size)
+            ]
+        )  # shape (batch, 1, num_poi)
 
-        loss = self.loss_fn(last_logit, true_pois)
+        tgt_poi_logits = tgt_poi_logits.view(-1, self.num_pois)
+        # The target is the first check-in in the test check-ins.
+        tgt_pois = tgt_pois[:,0].reshape(-1)  # shape (batch, 1, num_poi)
 
-        acc1 = self.acc1(last_logit, true_pois)
-        acc5 = self.acc5(last_logit, true_pois)
-        acc10 = self.acc10(last_logit, true_pois)
-        acc20 = self.acc20(last_logit, true_pois)
-        mrr = self.mrr(last_logit, true_pois)
+        poi_loss = self.loss_fn(tgt_poi_logits, tgt_pois.reshape(-1))
 
-        self.log("Val/Loss", loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/Acc@1", acc1, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/Acc@5", acc5, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/Acc@10", acc10, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/Acc@20", acc20, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/MRR", mrr, on_epoch=True, reduce_fx="mean", prog_bar=True)
+        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
+        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
+        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
+        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
+        mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
 
-        return loss
+        self.poi_loss_avg.update(poi_loss)
+        self.acc1_avg.update(acc1_val.detach().cpu().item())
+        self.acc5_avg.update(acc5_val.detach().cpu().item())
+        self.acc10_avg.update(acc10_val.detach().cpu().item())
+        self.acc20_avg.update(acc20_val.detach().cpu().item())
+        self.mrr_avg.update(mrr_val.detach().cpu().item())
 
-    def test_step(self, batch, batch_idx): ...
+        self.log("Val/Loss", poi_loss, prog_bar=False, on_epoch=True, logger=True)
+        return poi_loss
+
+    def on_validation_epoch_start(self):
+        self.poi_loss_avg.reset()
+        self.acc1_avg.reset()
+        self.acc5_avg.reset()
+        self.acc10_avg.reset()
+        self.acc20_avg.reset()
+        self.mrr_avg.reset()
+
+    def on_validation_epoch_end(self):
+        self.logger.experiment.add_scalar(
+            "Val/POI Loss", self.poi_loss_avg.avg, self.current_epoch
+        )
+        self.logger.experiment.add_scalar(
+            "Val/Acc@1", self.acc1_avg.avg, self.current_epoch
+        )
+        self.logger.experiment.add_scalar(
+            "Val/Acc@5", self.acc5_avg.avg, self.current_epoch
+        )
+        self.logger.experiment.add_scalar(
+            "Val/Acc@10", self.acc10_avg.avg, self.current_epoch
+        )
+        self.logger.experiment.add_scalar(
+            "Val/Acc@20", self.acc20_avg.avg, self.current_epoch
+        )
+        self.logger.experiment.add_scalar(
+            "Val/MRR", self.mrr_avg.avg, self.current_epoch
+        )
+
+        return super().on_validation_epoch_end()
+
+    def test_step(self, batch, batch_idx):
+        """
+        Batch contains x, y, original lengths,
+        where x contians (in order):
+            [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
+            Each item in the batch has 1 User ID and a sequence of checki-ins (the rest of the items are lists)
+        - y also contains the same elements but it contains the last sliced ordered check-ins of the user for test
+        - elements in y are check-ins that the model has not seen during training
+        - the number of elements depends on the `num_test_checkins` of `FoursquareNYC`
+
+        ** The collate function pads the sequences in the batch to maximum length for testing.
+        ** In test phase we input the entire user trajectory to the model and slice the logits corresponding
+        ** to the test check-ins.
+
+        """
+        x, y, orig_lengths = batch
+        user_ids, pois = (
+            x[0],
+            x[1],
+        )  # User ID shape [batch], POIs shape [batch, seq_len]
+        tgt_pois = y[1]
+
+        batch_size = pois.shape[0]
+        seq_len = pois.size(1)
+        target_seq_len = tgt_pois.size(1)
+
+        mask = torch.arange(seq_len, device=user_ids.device).expand(
+            len(orig_lengths), seq_len
+        ) < orig_lengths.unsqueeze(1)
+        user_ids = user_ids.unsqueeze(1).repeat(1, seq_len)  # shape [batch, seq_len]
+        user_ids *= mask
+
+        poi_logits = self.forward(
+            user_ids, pois, orig_lengths
+        )  # shape (batch, seq_len, num_poi)
+
+        # For prediction we only use the logits related to the test visits which start 
+        # from the logits produced for the last training sample at index `last_train_indices`
+        # to `orig_lengths - 1` or simply `last_train_indices:orig_lengths`
+        last_train_indices = orig_lengths - target_seq_len
+
+        tgt_poi_logits = torch.stack(
+            [
+                poi_logits[i, last_train_indices[i] : orig_lengths[i], :]
+                for i in range(batch_size)
+            ]
+        )  # shape (batch, target_seq_len, num_poi)
+
+        tgt_poi_logits = tgt_poi_logits.view(-1, self.num_pois)
+
+        tgt_pois = tgt_pois.reshape(-1)
+
+        poi_loss = self.loss_fn(tgt_poi_logits, tgt_pois.reshape(-1))
+
+
+        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
+        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
+        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
+        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
+        mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
+
+        self.poi_loss_avg.update(poi_loss)
+        self.acc1_avg.update(acc1_val.detach().cpu().item())
+        self.acc5_avg.update(acc5_val.detach().cpu().item())
+        self.acc10_avg.update(acc10_val.detach().cpu().item())
+        self.acc20_avg.update(acc20_val.detach().cpu().item())
+        self.mrr_avg.update(mrr_val.detach().cpu().item())
+
+    def on_test_epoch_start(self):
+        self.poi_loss_avg.reset()
+        self.acc1_avg.reset()
+        self.acc5_avg.reset()
+        self.acc10_avg.reset()
+        self.acc20_avg.reset()
+        self.mrr_avg.reset()
+        return super().on_test_epoch_start()
+
+    def on_test_epoch_end(self):
+        headers = ["Metric", "Score"]
+        table = [
+            ["Acc@1", self.acc1_avg.avg],
+            ["Acc@5", self.acc5_avg.avg],
+            ["Acc@10", self.acc10_avg.avg],
+            ["Acc@20", self.acc20_avg.avg],
+            ["MRR", self.mrr_avg.avg],
+        ]
+        print(tabulate(table, headers, tablefmt="rounded_grid"))
+        return super().on_test_epoch_end()
 
     def configure_optimizers(self):
         """
@@ -201,4 +357,11 @@ class TrajLSTM(pl.LightningModule):
             optimizer = torch.optim.AdamW(self.parameters(), lr=self.optim_lr)
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
-        return optimizer
+            
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, mode='min', patience=10)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': scheduler,
+            'monitor': "Val/Loss"
+        }
+

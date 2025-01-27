@@ -6,6 +6,7 @@ import torch_geometric.nn as tgnn
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 import pytorch_lightning as pl
+from tabulate import tabulate
 
 from ..metrics import MRR, AccuracyK
 from ..dataset import FoursquareNYC
@@ -22,22 +23,23 @@ class HMT_GRN_V2(pl.LightningModule):
         user_emb_dim: int = 256,
         poi_emb_dim: int = 512,
         poi_cat_emb_dim: int = 128,
-        gh_emb_dim: int = 512,
+        gh_emb_dim: int = 128,
         ts_emb_dim: int = 128,
         hidden_dim: int = 512,
         emb_switch: List[bool] = [
             True,
             True,
             False,
-            False,
+            True,
         ],  # [user_emb, poi_emb, poi_cat_emb, ts_emb]
         num_lstm_layers: int = 1,
-        lstm_dropout: float = 0,
-        emb_dropout: float = 0.5,
+        lstm_dropout: float = 0.,
+        emb_dropout: float = 0.9,
         num_GAT_heads: int = 4,
-        GAT_dropout: float = 0.0,
-        task_loss_coefficients: List[float] = [1., 1., 1., 1.],
-        optim_lr: float = 1e-4,
+        GAT_dropout: float = 0.5,
+        # task_loss_coefficients: List[float] = [1., 1., 1., 1.],
+        task_loss_coefficients: List[float] = [1., 0., 0.5, 0.],
+        optim_lr: float = 0.0001,
         optim_type: str = "adamw",
     ) -> None:
 
@@ -157,6 +159,7 @@ class HMT_GRN_V2(pl.LightningModule):
             nn.Linear(in_features=hidden_dim + gh_emb_dim, out_features=num_gh)
             for num_gh in self.num_ghs
         ])
+        
 
         # This single loss function is applicable to all tasks since the padding index for all
         # embeddings are 0.
@@ -362,19 +365,27 @@ class HMT_GRN_V2(pl.LightningModule):
         
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
         
-        self.poi_loss_avg.update(poi_loss)
+        self.poi_loss_avg.update(poi_loss.detach().cpu().item())
         for idx, gh_loss in enumerate(gh_losses):
-            self.geohash_losses_avg[idx].update(gh_loss)
+            self.geohash_losses_avg[idx].update(gh_loss.detach().cpu().item())
         
         return total_loss / 4
 
-    def on_train_epoch_end(self):
-        # self.logger.experiment.add_scalar("Train/POI Loss", self.poi_loss_avg.avg, self.current_epoch)
-        self.log("Train/POI Loss", self.poi_loss_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
+    def on_train_batch_start(self, batch, batch_idx):
         self.poi_loss_avg.reset()
         for idx in range(len(self.geohash_precision)):
-            self.log(f"Train/Geohash P{self.geohash_precision[idx]} Loss", self.geohash_losses_avg[idx].avg, on_epoch=True, prog_bar=False, sync_dist=True)
             self.geohash_losses_avg[idx].reset()
+        self.logger.experiment.add_scalar(
+            "Learning Rate",
+            self.optimizers(use_pl_optimizer=False).param_groups[0]["lr"],
+            self.current_epoch,
+        )
+        return super().on_train_batch_start(batch, batch_idx)
+    
+    def on_train_epoch_end(self):
+        self.logger.experiment.add_scalar("Train/POI Loss", self.poi_loss_avg.avg, self.current_epoch)
+        for idx in range(len(self.geohash_precision)):
+            self.logger.experiment.add_scalar(f"Train/Geohash P{self.geohash_precision[idx]} Loss", self.geohash_losses_avg[idx].avg, self.current_epoch)
         return super().on_train_epoch_end()
     
     
@@ -464,7 +475,6 @@ class HMT_GRN_V2(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
         
-        # print(tgt_pois.shape, tgt_poi_logits.shape)
         tgt_pois = tgt_pois.reshape(-1)
         
         tgt_ghs = [tgt_gh1, tgt_gh2, tgt_gh3]
@@ -483,132 +493,66 @@ class HMT_GRN_V2(pl.LightningModule):
         
         
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
-
+        
+        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
+        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
+        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
+        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
+        mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
+        
         self.poi_loss_avg.update(poi_loss)
         for idx, gh_loss in enumerate(gh_losses):
             self.geohash_losses_avg[idx].update(gh_loss)
-            
-        self.acc1_avg.update(self.acc1(tgt_poi_logits, tgt_pois))
-        self.acc5_avg.update(self.acc5(tgt_poi_logits, tgt_pois))
-        self.acc10_avg.update(self.acc10(tgt_poi_logits, tgt_pois))
-        self.acc20_avg.update(self.acc20(tgt_poi_logits, tgt_pois))
-        self.mrr_avg.update(self.mrr(tgt_poi_logits, tgt_pois))
+        self.acc1_avg.update(acc1_val.detach().cpu().item())
+        self.acc5_avg.update(acc5_val.detach().cpu().item())
+        self.acc10_avg.update(acc10_val.detach().cpu().item())
+        self.acc20_avg.update(acc20_val.detach().cpu().item())
+        self.mrr_avg.update(mrr_val.detach().cpu().item())
+
+        self.log("Val/Loss", poi_loss, prog_bar=False, on_epoch=True, logger=True)
         
         return total_loss / 4
-        # x, y, orig_lengths = batch
-
-        # # User ID shape [batch]
-        # # POIs, POIs Cat, Geohash Vectors, Time Slots, and Unix Timestamp shape [batch, seq_len]
-        # # Target values are unseen check-ins from user trajectories.
-        # if len(self.geohash_precision) == 1:
-        #     users, pois, pois_cat, gh1, ts, ut = x
-        #     _, tgt_pois, tgt_pois_cat, tgt_gh1 = y
-        #     gh2, gh3, tgt_gh2, tgt_gh3 = None, None, None, None
-        # elif len(self.geohash_precision) == 2:
-        #     users, pois, pois_cat, gh1, gh2, ts, ut = x
-        #     _, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2 = y
-        #     gh3, tgt_gh3 = None
-        # elif len(self.geohash_precision) == 3:
-        #     users, pois, pois_cat, gh1, gh2, gh3, ts, ut = x
-        #     _, tgt_pois, tgt_pois_cat, tgt_gh1, tgt_gh2, tgt_gh3 = y
-        # else:
-        #     raise RuntimeError(
-        #         "The case for more than 3 geohash precisions in not handeled."
-        #     )
-
-        # batch_size = pois.size(0)
-        # seq_len = pois.size(1)
-        # target_seq_len = tgt_pois.size(1)
-        # device = users.device
-        
-        # # This mask contains 1 in places that the sequences does not contain pad token
-        # mask = torch.arange(seq_len, device=device).expand(
-        #     len(orig_lengths), seq_len
-        # ) < orig_lengths.unsqueeze(1)
-
-        # # user IDs are the same for all elements in the sequence (trajectory)
-        # users = users.unsqueeze(1).repeat(1, seq_len)  # shape [batch, seq_len]
-        # users *= mask
-
-        # poi_logits, ghs_logits = self.forward(
-        #     users, pois, pois_cat, [gh1, gh2, gh3], ts, ut, orig_lengths, mask
-        # )
-        
-
-        # # For prediction we only use the logits related to the last prediction of the model
-        # # this is actually `orig_lengths - 1 - (target_seq_len - 1)` since we concatenate
-        # # the test visits to the train trajectory during test and validation phase.
-        # last_valid_indices = orig_lengths - target_seq_len
-        # batch_indices = torch.arange(batch_size, device=device)
-        
-        # last_poi_logits = poi_logits[
-        #     batch_indices, last_valid_indices, :
-        # ]  # shape (batch, num_poi)
-        
-        # last_ghs_logits = [
-        #     ghs_logits[idx][batch_indices, last_valid_indices, :]
-        #     for idx in range(len(self.geohash_precision))
-        # ] # shape (num_geohash_precisions, (batch, num_gh@P))
-        
-        # last_poi_logits = last_poi_logits.view(-1, self.num_pois)
-        # last_ghs_logits = [
-        #     last_ghs_logits[idx].view(-1, self.num_ghs[idx])
-        #     for idx in range(len(self.geohash_precision))
-        # ]
-        
-        # tgt_pois = tgt_pois[:, 0] # take the first POI in the test check-ins, shape (batch)
-        # tgt_ghs = [
-        #     tgt_gh[:, 0] for tgt_gh in [tgt_gh1, tgt_gh2, tgt_gh3] if tgt_gh is not None
-        # ] # take the first Geohash in the test check-ins for each precision, shape (batch)
-
-        # poi_loss = self.loss_fn(last_poi_logits, tgt_pois.reshape(-1))
-        # gh_losses = [
-        #     self.loss_fn(last_ghs_logits[idx], tgt_ghs[idx].reshape(-1))
-        #     for idx in range(len(self.geohash_precision))
-        # ]
-        
-        # poi_loss_weighted = poi_loss * self.task_loss_coefficients[0]
-        # gh_losses_weighted = [
-        #     gh_losses[idx] * self.task_loss_coefficients[idx + 1]
-        #     for idx in range(len(self.geohash_precision))
-        # ]
-        
-        # total_loss = poi_loss_weighted + sum(gh_losses_weighted)
-
-        # acc1 = self.acc1(last_poi_logits, tgt_pois)
-        # acc5 = self.acc5(last_poi_logits, tgt_pois)
-        # acc10 = self.acc10(last_poi_logits, tgt_pois)
-        # acc20 = self.acc20(last_poi_logits, tgt_pois)
-        # mrr = self.mrr(last_poi_logits, tgt_pois)
-        
 
         
-        # return total_loss / 4
-        
-    def on_validation_epoch_end(self):
-        self.log("Val/POI Loss", self.poi_loss_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
+    def on_validation_epoch_start(self):
         self.poi_loss_avg.reset()
         for idx in range(len(self.geohash_precision)):
-            self.log(f"Val/Geohash P{self.geohash_precision[idx]} Loss", self.geohash_losses_avg[idx].avg, on_epoch=True, prog_bar=False, sync_dist=True)
             self.geohash_losses_avg[idx].reset()
-        
-        self.log("Val/Acc@1", self.acc1_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("Val/Acc@5", self.acc5_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("Val/Acc@10", self.acc10_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
-        self.log("Val/Acc@20", self.acc20_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
         self.acc1_avg.reset()
         self.acc5_avg.reset()
         self.acc10_avg.reset()
-        self.acc20_avg.reset
-        
-        self.log("Val/MRR", self.mrr_avg.avg, on_epoch=True, prog_bar=False, sync_dist=True)
+        self.acc20_avg.reset()
         self.mrr_avg.reset()
+        return super().on_validation_epoch_start()
+    
+    def on_validation_epoch_end(self):
+        self.logger.experiment.add_scalar("Val/POI Loss", self.poi_loss_avg.avg, self.current_epoch)
+        for idx in range(len(self.geohash_precision)):
+            self.logger.experiment.add_scalar(f"Val/Geohash P{self.geohash_precision[idx]} Loss", self.geohash_losses_avg[idx].avg, self.current_epoch)
+        self.logger.experiment.add_scalar("Val/Acc@1", self.acc1_avg.avg, self.current_epoch)
+        self.logger.experiment.add_scalar("Val/Acc@5", self.acc5_avg.avg, self.current_epoch)
+        self.logger.experiment.add_scalar("Val/Acc@10", self.acc10_avg.avg, self.current_epoch)
+        self.logger.experiment.add_scalar("Val/Acc@20", self.acc20_avg.avg, self.current_epoch)
+        self.logger.experiment.add_scalar("Val/MRR", self.mrr_avg.avg, self.current_epoch)  
         
         return super().on_validation_epoch_end()
     
 
     def test_step(self, batch, batch_idx):
-        # Testing logic
+        """
+        Batch contains x, y, original lengths,
+        where x contians (in order):
+            [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
+            Each item in the batch has 1 User ID and a sequence of checki-ins (the rest of the items are lists)
+        - y also contains the same elements but it contains the last sliced ordered check-ins of the user for test
+        - elements in y are check-ins that the model has not seen during training
+        - the number of elements depends on the `num_test_checkins` of `FoursquareNYC`
+
+        ** The collate function pads the sequences in the batch to maximum length for testing.
+        ** In test phase we input the entire user trajectory to the model and slice the logits corresponding
+        ** to the test check-ins.
+
+        """
         x, y, orig_lengths = batch
 
         # User ID shape [batch]
@@ -653,7 +597,6 @@ class HMT_GRN_V2(pl.LightningModule):
         # For prediction we only use the logits related to the test visits which start 
         # from the logits produced for the last training sample at index `last_train_indices`
         # to `orig_lengths - 1` or simply `last_train_indices:orig_lengths`
-
         last_train_indices = orig_lengths - target_seq_len
         
         
@@ -677,7 +620,6 @@ class HMT_GRN_V2(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
         
-        # print(tgt_pois.shape, tgt_poi_logits.shape)
         tgt_pois = tgt_pois.reshape(-1)
         
         tgt_ghs = [tgt_gh1, tgt_gh2, tgt_gh3]
@@ -696,25 +638,44 @@ class HMT_GRN_V2(pl.LightningModule):
         
         
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
+        
+        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
+        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
+        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
+        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
+        mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
+        
+        self.poi_loss_avg.update(poi_loss)
+        for idx, gh_loss in enumerate(gh_losses):
+            self.geohash_losses_avg[idx].update(gh_loss)
+        self.acc1_avg.update(acc1_val.detach().cpu().item())
+        self.acc5_avg.update(acc5_val.detach().cpu().item())
+        self.acc10_avg.update(acc10_val.detach().cpu().item())
+        self.acc20_avg.update(acc20_val.detach().cpu().item())
+        self.mrr_avg.update(mrr_val.detach().cpu().item())
 
-        acc1 = self.acc1(tgt_poi_logits, tgt_pois)
-        acc5 = self.acc5(tgt_poi_logits, tgt_pois)
-        acc10 = self.acc10(tgt_poi_logits, tgt_pois)
-        acc20 = self.acc20(tgt_poi_logits, tgt_pois)
-        mrr = self.mrr(tgt_poi_logits, tgt_pois)
-        
-        self.log("Test/Total Loss", total_loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Test/POI Loss", poi_loss, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        for idx in range(len(self.geohash_precision)):
-            self.log(f"Test/Geohash P{self.geohash_precision[idx]} Loss", gh_losses[idx], on_epoch=True, reduce_fx="mean", prog_bar=False)
-        
-        self.log("Test/Acc@1", acc1, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        self.log("Test/Acc@5", acc5, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        self.log("Test/Acc@10", acc10, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        self.log("Test/Acc@20", acc20, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        self.log("Test/MRR", mrr, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        
         return total_loss / 4
+    
+    def on_test_epoch_start(self):
+        self.poi_loss_avg.reset()
+        self.acc1_avg.reset()
+        self.acc5_avg.reset()
+        self.acc10_avg.reset()
+        self.acc20_avg.reset()
+        self.mrr_avg.reset()
+        return super().on_test_epoch_start()
+
+    def on_test_epoch_end(self):
+        headers = ["Metric", "Score"]
+        table = [
+            ["Acc@1", self.acc1_avg.avg],
+            ["Acc@5", self.acc5_avg.avg],
+            ["Acc@10", self.acc10_avg.avg],
+            ["Acc@20", self.acc20_avg.avg],
+            ["MRR", self.mrr_avg.avg],
+        ]
+        print(tabulate(table, headers, tablefmt="rounded_grid"))
+        return super().on_test_epoch_end()
 
     def configure_optimizers(self):
         """
@@ -724,7 +685,12 @@ class HMT_GRN_V2(pl.LightningModule):
             optimizer = torch.optim.AdamW(self.parameters(), lr=self.optim_lr)
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, mode='min', patience=10)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': scheduler,
+            'monitor': "Val/Loss"
+        }
 
 
 

@@ -55,7 +55,7 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
-    # torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("medium")
 
     cpu = nn_utils.get_cpu_device()
     gpu = nn_utils.get_gpu_device()
@@ -76,50 +76,46 @@ if __name__ == "__main__":
         tb_logger = TensorBoardLogger(log_dir, name="Baseline")
 
         trainer = Trainer(
-            max_epochs=400,
+            max_epochs=200,
             accelerator="gpu",
-            # devices=gpu.type,
-            # log_every_n_steps=5,
-            check_val_every_n_epoch=50,
             logger=tb_logger,
             strategy="auto",
-            # callbacks=[
-            #     EarlyStopping(
-            #         monitor="Val/Loss", patience=3, min_delta=0.0005, mode="min"
-            #     ),
-            # ],
+            callbacks=[
+                EarlyStopping(
+                    monitor="Val/Loss", patience=20, min_delta=0.001, mode="min"
+                ),
+            ],
         )
 
         trainer.fit(model, datamodule=ds)
-
+        trainer.test(model, datamodule=ds)
     elif args.model == "grn":
 
         ds = FoursquareNYC(
             batch_size=8,
+            # max_traj_length=128,
             spatial_graph_self_loop=True,
             temporal_graph_self_loop=True,
             temporal_graph_jaccard_mult_set=False,
             temporal_graph_jaccard_sim_tsh=0.5,
         )
-        # model = HMT_GRN(ds)
         model = HMT_GRN_V2(ds)
         tb_logger = TensorBoardLogger(log_dir, name="HMT-GRN")
 
         trainer = Trainer(
             max_epochs=200,
             accelerator="gpu",
-            # devices=gpu.type,
-            # log_every_n_steps=5,
-            check_val_every_n_epoch=10,
             logger=tb_logger,
             strategy="auto",
-            # callbacks=[
-            #     EarlyStopping(
-            #         monitor="Val/Loss", patience=3, min_delta=0.0005, mode="min"
-            #     ),
-            # ],
+            callbacks=[
+                EarlyStopping(
+                    monitor="Val/Loss", patience=25, min_delta=0.001, mode="min"
+                ),
+            ],
         )
         trainer.fit(model, datamodule=ds)
+        trainer.test(model, datamodule=ds)
+
 
     else:
         raise RuntimeError("Invalid model type. Valid choices are [`grn`, `baseline`]")
