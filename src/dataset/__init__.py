@@ -1,2 +1,2 @@
 from .FoursquareNYC import FoursquareNYC
-from .TrajectoryDataset import UserTrajectoryDataset
+from .trajectory_dataset import UserTrajectoryDataset

@@ -6,8 +6,9 @@ from ray.tune import CLIReporter
 from ray.train import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 
+from files.src.models import baseline
 from src.dataset import FoursquareNYC
-from src.models import Baseline, HMT_GRN, HMT_GRN_V2
+from src.models import HMT_GRN, HMT_GRN_V2
 from src.trainer import CustomTrainer
 
 import os

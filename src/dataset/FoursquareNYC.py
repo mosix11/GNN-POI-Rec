@@ -8,9 +8,9 @@ from itertools import combinations
 from math import radians, sin, cos, sqrt, atan2, degrees
 
 from torch.utils.data import DataLoader
-from pytorch_lightning import LightningDataModule
+import pytorch_lightning as pl
 
-from .TrajectoryDataset import UserTrajectoryDataset
+from .trajectory_dataset import UserTrajectoryDataset
 
 
 from torch_geometric.typing import SparseTensor
@@ -29,11 +29,9 @@ from functools import partial
 from ..utils import misc_utils
 
 
-
-
-class FoursquareNYC(LightningDataModule):
+class FoursquareNYC(pl.LightningDataModule):
     """
-    This class is responsible for downloading, loading, filtering, and preprocessing the 
+    This class is responsible for downloading, loading, filtering, and preprocessing the
     Foursqure NYC dataset. The class provides dataloader for training, validation, and
     testing phases. Most of the operations are done according to the specifications in
     this papaer: https://dl.acm.org/doi/pdf/10.1145/3477495.3531989
@@ -41,6 +39,7 @@ class FoursquareNYC(LightningDataModule):
     dataset I change most of the hyperparameters.
 
     """
+
     def __init__(
         self,
         data_dir: Path = Path("./data").absolute(),
@@ -64,18 +63,18 @@ class FoursquareNYC(LightningDataModule):
         """
         The `init` method carries out all the necessary operations needed for downloading,
         loading, preprocessing, and plotting the statistics of the datset.
-        
+
         Args:
             `data_dir`: (Path): The directory to save and extract the downloaded dataset.
             `batch_size`: (int): Batch size used by data loaders.
             `num_workers`: (int): Number of workers used by data loaders.
-            `user_checkin_tsh` (Tuple[int, int]): 
+            `user_checkin_tsh` (Tuple[int, int]):
                 The threshold used for clipping user trajectories.
-            `venue_checkin_tsh` (Tuple[int, int]): 
+            `venue_checkin_tsh` (Tuple[int, int]):
                 The threshold used for clipping poi trajectories.
             `num_test_checkins` (int): Number of check-ins splited for testing.
             `geohash_precision` (List[int]): Precision levels used for Geohash encoding.
-            `max_traj_length` (int): 
+            `max_traj_length` (int):
                 The length used to sliced tranjectories in batches during training.
             `traj_sampling_method` (str):
                 The method used by collate function to sample sub trajectories during training.
@@ -85,13 +84,13 @@ class FoursquareNYC(LightningDataModule):
                 repetition of the items in the set. Note that there is no multiset formulation
                 of Jaccard similarity! I just made up one version to see if it works better!
             `temporal_graph_jaccard_sim_tsh` (float):
-                The cut off threshold of Jaccard similarity used to construct edges in 
+                The cut off threshold of Jaccard similarity used to construct edges in
                 temporal graph.
             `spatial_graph_self_loop` (bool): Whether to add self loop to Spatial Graph.
             `temporal_graph_self_loop` (bool): Whether to add self loop to Temporal Graph.
-            `plot_stats` (bool): 
+            `plot_stats` (bool):
                 Wether to plot datset stast usign matplotlob or do simple logging.
-        
+
         """
 
         super().__init__()
@@ -375,6 +374,7 @@ class FoursquareNYC(LightningDataModule):
         df_flt = self._reassign_IDs(df_flt)
 
         if self.plot_stats:
+            print("\n\n")
             unique_vens_locs_counts = df_flt.groupby("Venue ID")[
                 ["Latitude", "Longitude"]
             ].apply(lambda group: group.drop_duplicates().shape[0])
@@ -382,7 +382,7 @@ class FoursquareNYC(LightningDataModule):
             plt.figure(figsize=(8, 5))
             plt.bar(values, frequencies, width=0.8, edgecolor="black", alpha=0.7)
             plt.xlabel("Number of Locations Associated to a Venue")
-            plt.ylabel("Frequency")
+            plt.ylabel("Frequency (log scale)")
             plt.title("Distribution of Number of Different Locations for Venues")
             plt.xticks(
                 np.arange(0, unique_vens_locs_counts.max() + 1)
@@ -391,6 +391,7 @@ class FoursquareNYC(LightningDataModule):
             plt.grid(axis="y", linestyle="--", alpha=0.7)
             plt.show()
         if self.plot_stats:
+            print("\n\n")
             distances = self._calculate_discrepancy_in_locations(df_flt)
             ids, distance_values = zip(*distances)
             distance_values = list(filter(lambda x: x != 0, distance_values))
@@ -420,6 +421,7 @@ class FoursquareNYC(LightningDataModule):
 
         df_flt = self._process_time(df_flt)
         if self.plot_stats:
+            print("\n\n")
             value_counts = df_flt["Time Slot"].value_counts().sort_index()
             plt.figure(figsize=(8, 5))
             plt.bar(
@@ -448,7 +450,7 @@ class FoursquareNYC(LightningDataModule):
                 },
             }
         )
-
+        self.disc
         # issues = self._check_geohash_consistency(df_flt)
         # print(self.STATS)
 
@@ -732,6 +734,7 @@ class FoursquareNYC(LightningDataModule):
             print(f"Number of venue categories: {df['Venue Category ID'].nunique()}")
 
         else:
+            print("\n\n")
             col_titles = ["Count", "Min Check-in", "Average Check-in", "Max Check-in"]
             row_titles = ["Users", "Venues", "Venue Ctg", "Total Records"]
             tbl_data = [
@@ -747,8 +750,8 @@ class FoursquareNYC(LightningDataModule):
                     num_venue_checkins.mean(),
                     num_venue_checkins.max(),
                 ],
+                [df["Venue Category ID"].nunique(), 0, 0, 0],
                 [df.shape[0], 0, 0, 0],
-                [df.shape[0], 0, 0, 0]
             ]
             misc_utils.plot_plt_table(
                 main_title="Records Stats",
@@ -758,6 +761,7 @@ class FoursquareNYC(LightningDataModule):
             )
 
             # Plot distributions of user and venue check-ins
+            print("\n\n")
             fig, axes = plt.subplots(1, 2, figsize=(8, 3), sharey=False)
             axes[0].hist(num_user_checkins, bins=100, color="blue", edgecolor="black")
             axes[0].set_title("Distribution of User Check-ins")
@@ -767,7 +771,7 @@ class FoursquareNYC(LightningDataModule):
             axes[1].hist(num_venue_checkins, bins=100, color="green", edgecolor="black")
             axes[1].set_title("Distribution of Venue Check-ins")
             axes[1].set_xlabel("Check-in Counts")
-            axes[1].set_ylabel("Frequency")
+            axes[1].set_ylabel("Frequency (log scale)")
             axes[1].set_xlim(left=0)
             axes[1].set_yscale("log")
 

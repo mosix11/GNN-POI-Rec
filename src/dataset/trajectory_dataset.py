@@ -1,11 +1,10 @@
-
 import torch
 import pandas as pd
 import numpy as np
 from torch.utils.data import Dataset
-
 from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_sequence
 import random
+from typing import List
 
 
 class UserTrajectoryDataset(Dataset):
@@ -23,9 +22,9 @@ class UserTrajectoryDataset(Dataset):
         """
         The function recieves the preprocessed train and test user trajectories
         and sets them as class properties.
-        
+
         Args:
-            `train_trajectories`: (pandas.DataFrame): 
+            `train_trajectories`: (pandas.DataFrame):
                 The dataframe contating users and a trajectory associated to each user.
             `test_trajectories`: (pandas.DataFrame):
                 The dataframe contating test check-ins.
@@ -49,9 +48,9 @@ class UserTrajectoryDataset(Dataset):
         """
         This function simply returns the training and test trajectories of
         a user at index `idx`
-        
+
         Args:
-            `idx`: (int): 
+            `idx`: (int):
                 Index of the user.
         """
         train_traj = self.train_trajectories.iloc[idx]
@@ -65,16 +64,41 @@ class UserTrajectoryDataset(Dataset):
         batch,
         max_seq_length: int,
         sampling_method: str,
-        geohash_precision: list,
+        geohash_precision: List[int],
         train: bool = True,
     ):
         """
-        This function simply returns the training and test trajectories of
-        a user at index `idx`
-        
+        This function provides a custom collate function for the UserTrajectoryDataset.
+        Since the trajectory data is of sequential nature and is processed with networks
+        designed for sequential data, in order to batch trajectories of different lengths
+        we need padd them to a constant length. The method provides functionality to choose
+        maximum length of the sequences in batch, alongside two types of sampling methdo
+        for sequences that exceed the specified maximum sequence length. Also depending on
+        whether the batches are sampled for training or testing, the collate function provides
+        different functionality.
+
         Args:
-            `idx`: (int): 
-                Index of the user.
+            `batch`: The batch of data provided to collate function by dataloader.
+            `max_seq_length` (int):
+                The maximum sequence length that is used in batches. User trajectories that
+                exceed this length, are sliced based on the strategy defined by `sampling_method`
+            `sampling_method` (str):
+                If set to `window` the user trajecties that have larger lengths than `max_seq_length`
+                are sliced by randomly drawn continuous indices. If the length of trajectory is `L`
+                then a random number in the interval `start ~ [0, L - max_seq_length)` is drawn and the
+                trajectory is sliced by indices `(start, start + max_seq_length)`.
+                If set to `random`, we randomly sample `max_seq_length` indices, from the range
+                `(0, L)`.
+            `geohash_precision` (List[int]):
+                Precision levels used for Geohash encoding.
+            `train` (bool):
+                If True, the target sequence is a shifted version of the input sequence (teacher
+                forcing), if set to False, it means the collate function is being used for
+                validation or test dataloader and the trajectories will not be sliced and
+                `max_seq_length` is set to the length of the longest trajectory in the batch.
+                Furhtermore, if this argument is set to False, the target values will not
+                be the shifted version of the input sequence anymore and are simply the test
+                check-ins and also we concatenate the test trajectory to the train trajectory.
         """
         train_batch, test_batch = zip(*batch)
 
