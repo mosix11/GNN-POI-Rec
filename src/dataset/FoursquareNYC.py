@@ -450,7 +450,6 @@ class FoursquareNYC(pl.LightningDataModule):
                 },
             }
         )
-        self.disc
         # issues = self._check_geohash_consistency(df_flt)
         # print(self.STATS)
 
