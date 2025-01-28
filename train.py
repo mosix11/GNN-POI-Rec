@@ -22,7 +22,9 @@ from pathlib import Path
 from src.dataset import FoursquareNYC
 from src.models import TrajLSTM, HMT_GRN_V2
 
-
+# The entery point of the training and evaluation procedure.
+# Based on the passed argument for --model the training will be done
+# on the Baseline model or on the HMT-GRN model.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -38,24 +40,20 @@ if __name__ == "__main__":
         "--config",
         help="Configuration to use for training the model.",
         type=str,
-        default="HMT_GRN.yaml",
     )
-    parser.add_argument(
-        "-r",
-        "--resume",
-        help="Resume training from the last checkpoint.",
-        action="store_true",
-    )
-    args = parser.parse_args()
 
-    # cfg_path = Path('configs').joinpath(args.config)
-    # if not cfg_path.exists(): raise RuntimeError('The specified config file was not found.')
-    # with open(cfg_path, 'r') as file:
-    #     cfg = yaml.full_load(file)
+    args = parser.parse_args()
+    if not args.config:
+        raise RuntimeError("You have to specify the training config file.")
+    cfg_path = Path("configs").joinpath(args.config)
+    if not cfg_path.exists():
+        raise RuntimeError("The specified config file was not found.")
+    with open(cfg_path, "r") as file:
+        cfg = yaml.full_load(file)
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
 
     cpu = nn_utils.get_cpu_device()
     gpu = nn_utils.get_gpu_device()
@@ -69,9 +67,9 @@ if __name__ == "__main__":
     log_dir.mkdir(exist_ok=True)
 
     if args.model == "baseline":
-        ds = FoursquareNYC(batch_size=128)
+        ds = FoursquareNYC(**cfg["dataset"])
 
-        model = TrajLSTM(ds)
+        model = TrajLSTM(ds, **cfg["model"])
 
         tb_logger = TensorBoardLogger(log_dir, name="Baseline")
 
@@ -79,6 +77,7 @@ if __name__ == "__main__":
             max_epochs=200,
             accelerator="gpu",
             logger=tb_logger,
+            enable_checkpointing=False,
             strategy="auto",
             callbacks=[
                 EarlyStopping(
@@ -91,15 +90,8 @@ if __name__ == "__main__":
         trainer.test(model, datamodule=ds)
     elif args.model == "grn":
 
-        ds = FoursquareNYC(
-            batch_size=8,
-            # max_traj_length=128,
-            spatial_graph_self_loop=True,
-            temporal_graph_self_loop=True,
-            temporal_graph_jaccard_mult_set=False,
-            temporal_graph_jaccard_sim_tsh=0.5,
-        )
-        model = HMT_GRN_V2(ds)
+        ds = FoursquareNYC(**cfg["dataset"])
+        model = HMT_GRN_V2(ds, **cfg["model"])
         tb_logger = TensorBoardLogger(log_dir, name="HMT-GRN")
 
         trainer = Trainer(
@@ -115,7 +107,6 @@ if __name__ == "__main__":
         )
         trainer.fit(model, datamodule=ds)
         trainer.test(model, datamodule=ds)
-
 
     else:
         raise RuntimeError("Invalid model type. Valid choices are [`grn`, `baseline`]")

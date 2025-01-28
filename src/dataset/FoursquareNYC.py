@@ -463,6 +463,7 @@ class FoursquareNYC(pl.LightningDataModule):
         self.poi_trajectories = poi_trajectories
 
         if self.plot_stats:
+            print("\n\n")
             col_titles = ["Users", "POIs", "POI Categories", "Test Check-ins"]
             for prc in self.geohash_precision:
                 col_titles.append(f"Geohash P{prc}")
@@ -484,6 +485,7 @@ class FoursquareNYC(pl.LightningDataModule):
                 row_titles=row_titles,
                 data=tbl_data,
             )
+            print("\n\n")
 
         # memory_usage = self.df_preprocessed.memory_usage(deep=True).sum()
         # print(f"The DataFrame is using {memory_usage / 1024:.2f} KB in memory.")

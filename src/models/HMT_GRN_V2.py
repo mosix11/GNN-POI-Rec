@@ -33,7 +33,7 @@ class HMT_GRN_V2(pl.LightningModule):
             True,
         ],  # [user_emb, poi_emb, poi_cat_emb, ts_emb]
         num_lstm_layers: int = 1,
-        lstm_dropout: float = 0.,
+        lstm_dropout: float = 0.0,
         emb_dropout: float = 0.9,
         num_GAT_heads: int = 4,
         GAT_dropout: float = 0.5,

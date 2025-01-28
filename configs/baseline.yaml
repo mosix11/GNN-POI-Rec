@@ -1,0 +1,26 @@
+dataset:
+  batch_size: 128
+  num_workers: 4
+  user_checkin_tsh: [20, 100000]
+  venue_checkin_tsh: [10, 100000]
+  num_test_checkins: 6
+  geohash_precision: [5, 6, 7]
+  max_traj_length: 64
+  traj_sampling_method: 'window'
+  temporal_graph_jaccard_mult_set: False
+  temporal_graph_jaccard_sim_tsh: 0.5
+  spatial_graph_self_loop: True
+  spatial_graph_geohash_precision: 6
+  temporal_graph_self_loop: True
+  plot_stats: False
+
+model:
+  user_emb_dim: 256
+  poi_emb_dim: 512
+  hidden_dim: 1024
+  num_layers: 1
+  lstm_dropout: 0.0
+  emb_dropout: 0.5
+  optim_lr: 1.0e-4
+  optim_type: 'adamw'
+
