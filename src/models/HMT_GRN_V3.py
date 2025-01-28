@@ -15,7 +15,7 @@ from ..utils import misc_utils
 from typing import List
 
 
-class HMT_GRN_V2(pl.LightningModule):
+class HMT_GRN_V3(pl.LightningModule):
 
     def __init__(
         self,
@@ -82,11 +82,10 @@ class HMT_GRN_V2(pl.LightningModule):
         self.ts_emb_dim = ts_emb_dim if emb_switch[3] else 0
         self.hidden_dim = hidden_dim
 
-
         self.emb_switch = emb_switch
 
         self.aggregated_emb_dim = np.sum(
-            [self.user_emb_dim, self.poi_emb_dim, self.poi_cat_emb_dim, self.ts_emb_dim]
+            [self.poi_emb_dim, self.poi_cat_emb_dim, self.ts_emb_dim]
         )
 
         self.optim_lr = optim_lr
@@ -153,7 +152,7 @@ class HMT_GRN_V2(pl.LightningModule):
         )
 
         self.poi_final_projector = nn.Linear(
-            in_features=hidden_dim, out_features=self.num_pois
+            in_features=self.user_emb_dim + hidden_dim, out_features=self.num_pois
         )
         self.geohash_projectors = nn.ModuleList([
             nn.Linear(in_features=hidden_dim + gh_emb_dim, out_features=num_gh)
@@ -252,14 +251,13 @@ class HMT_GRN_V2(pl.LightningModule):
                 )
         )
                     
-        lstm_inputs = torch.cat(
-            [final_poi_emb, user_embs], dim=-1
-        )  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
+        lstm_inputs = final_poi_emb # shape (batch, seq_len, poi_emb_dim)
+        
         if poi_cat_embs is not None:
-            # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim)
+            # shape (batch, seq_len, poi_emb_dim  + poi_cat_emb_dim)
             lstm_inputs = torch.cat([lstm_inputs, poi_cat_embs], dim=-1) 
         if ts_embs is not None:
-            # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim + ts_emb_dim)
+            # shape (batch, seq_len, poi_emb_dim  + poi_cat_emb_dim + ts_emb_dim)
             lstm_inputs = torch.cat([lstm_inputs, ts_embs], dim=-1) 
 
         lstm_inputs = self.emb_dropout(lstm_inputs)
@@ -279,7 +277,8 @@ class HMT_GRN_V2(pl.LightningModule):
             pck_output, batch_first=True
         )  # shape (batch, seq_len, hidden_dim)
 
-        poi_logits = self.poi_final_projector(lstm_out)
+        poi_lstm_out = torch.cat([lstm_out, user_embs], dim=-1)
+        poi_logits = self.poi_final_projector(poi_lstm_out)
         
         gh_embs = [
             self.emb_dropout(gh_emb) for gh_emb in gh_embs
