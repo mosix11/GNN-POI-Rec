@@ -24,7 +24,8 @@ from src.models import TrajLSTM, HMT_GRN_V2
 
 # The entery point of the training and evaluation procedure.
 # Based on the passed argument for --model the training will be done
-# on the Baseline model or on the HMT-GRN model.
+# on the Baseline model or on the HMT-GRN model. Also for each model
+# the specified configuration file name should be passed as --config.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -53,7 +54,7 @@ if __name__ == "__main__":
 
     torch.backends.cudnn.enabled = True
     torch.backends.cudnn.benchmark = True
-    torch.set_float32_matmul_precision("high")
+    # torch.set_float32_matmul_precision("high")
 
     cpu = nn_utils.get_cpu_device()
     gpu = nn_utils.get_gpu_device()

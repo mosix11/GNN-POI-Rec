@@ -13,6 +13,10 @@ from ..utils import misc_utils
 
 
 class TrajLSTM(pl.LightningModule):
+    """
+    Baseline model for processing trajectories of user check-ins and 
+    producing a probablity over next POI using a simple LSTM.
+    """
 
     def __init__(
         self,
@@ -27,6 +31,18 @@ class TrajLSTM(pl.LightningModule):
         optim_type: str = "adamw",
     ) -> None:
         super().__init__()
+        """
+        The init method is responsible for initializing model layers and properties.
+        
+        Args:
+            `user_emb_dim`: (int): The embedding dimension of the User IDs.
+            `poi_emb_dim`: (int): The embedding dimension of the POI IDs.
+            `hidden_dim`: (int): The dimension of the hidden units of LSTM
+            `num_layers` (int): Number of LSTM layers.
+            `emb_dropout`: (float): Dropout rate for all embeddings.
+            `optim_lr`: (float): Learning rate for the optimizer.
+            `optim_type`: (str): Type of the optimizer. Between [`adam`, `adamw`].
+        """
 
         num_user = dataset.STATS["num_user"] + 1  # index 0 is padding
         num_pois = dataset.STATS["num_pois"] + 1  # index 0 is padding
@@ -110,14 +126,19 @@ class TrajLSTM(pl.LightningModule):
         return logits
 
     def training_step(self, batch, batch_idx):
-        # Training step logic
         """
+        Training step logic.
+        
         Batch contains x, y, original lengths,
         where x and y contain (in order):
-            [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
+            [User ID, POIs, POIs Category, POIs Geohashes, POIs Time Slot, POIs Unix Timestamp]
             Each item in the batch has 1 User ID and a sequence of checki-ins (the rest of the items are lists)
         - y, is the shifted version of x by 1 time step (teacher forcing)
 
+        Args:
+            batch: (List[Tensor]): The training batch.
+        Returns:
+            training loss.
         """
         x, y, orig_lengths = batch
         user_ids, pois = (
@@ -161,20 +182,24 @@ class TrajLSTM(pl.LightningModule):
         return super().on_train_epoch_end()
 
     def validation_step(self, batch, batch_idx):
-        # Validation step logic
         """
+        Validation step logic.
+        
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
             Each item in the batch has 1 User ID and a sequence of checki-ins (the rest of the items are lists)
-        - y also contains the same elements but it contains the last sliced ordered check-ins of the user for test
-        - elements in y are check-ins that the model has not seen during training
+        - y also contains the same elements but it contains the last sliced ordered check-ins of the user
         - the number of elements depends on the `num_test_checkins` of `FoursquareNYC`
 
         ** The collate function pads the sequences in the batch to maximum length for testing.
         ** In each validation step the model only predicts the first element in the test samples
-        ** Full testing for all test samples will be done after training is finished (refer to test_step method)
+        ** Full testing for all test samples will be don after training is finished (refer to the test_step method)
 
+        Args:
+            batch: (List[Tensor]): The validation batch.
+        Returns:
+            validation loss.
         """
         x, y, orig_lengths = batch
         user_ids, pois = (
@@ -262,15 +287,16 @@ class TrajLSTM(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         """
+        Test phase logic.
+        
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
             Each item in the batch has 1 User ID and a sequence of checki-ins (the rest of the items are lists)
-        - y also contains the same elements but it contains the last sliced ordered check-ins of the user for test
-        - elements in y are check-ins that the model has not seen during training
-        - the number of elements depends on the `num_test_checkins` of `FoursquareNYC`
+        - y also contains the same elements but it contains the last sliced ordered check-ins of the user
+        - Tthe number of test check-ins depends on the `num_test_checkins` of `FoursquareNYC`
 
-        ** The collate function pads the sequences in the batch to maximum length for testing.
+        ** The collate function pads the sequences in the batch to maximum sequence length for testing.
         ** In test phase we input the entire user trajectory to the model and slice the logits corresponding
         ** to the test check-ins.
 
@@ -338,6 +364,7 @@ class TrajLSTM(pl.LightningModule):
         return super().on_test_epoch_start()
 
     def on_test_epoch_end(self):
+        # Report the perfromance of the model.
         headers = ["Metric", "Score"]
         table = [
             ["Acc@1", self.acc1_avg.avg],
@@ -346,12 +373,17 @@ class TrajLSTM(pl.LightningModule):
             ["Acc@20", self.acc20_avg.avg],
             ["MRR", self.mrr_avg.avg],
         ]
+        print('\n\n')
         print(tabulate(table, headers, tablefmt="rounded_grid"))
+        print('\n\n')
         return super().on_test_epoch_end()
 
     def configure_optimizers(self):
         """
-        Optimizer configuration
+        Optimizer configuration.
+        Based on `optimizer_type` hyperparameter, one of Adam or AdamW optimizers
+        will be initialized.
+        For learning rate scheduling, ReduceLROnPlateau scheduler is used.
         """
         if self.optim_type == "adamw":
             optimizer = torch.optim.AdamW(self.parameters(), lr=self.optim_lr)

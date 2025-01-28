@@ -1,5 +1,5 @@
 dataset:
-  batch_size: 32
+  batch_size: 8
   num_workers: 4
   user_checkin_tsh: [20, 100000]
   venue_checkin_tsh: [10, 100000]

@@ -14,6 +14,11 @@ from typing import List
 
 
 class HMT_GRN(pl.LightningModule):
+    """
+    This class is unfinished. Since the sequential processing of graph attention
+    operation (as done in the original paper) was to slow and inefficient, I
+    switched to another approach implementd in `HMT_GRN_V2`.
+    """
 
     def __init__(
         self,
@@ -35,7 +40,7 @@ class HMT_GRN(pl.LightningModule):
         emb_dropout: float = 0.5,
         num_GAT_heads: int = 4,
         GAT_dropout: float = 0.0,
-        task_loss_coefficients: List[float] = [1., 1., 1., 1.],
+        task_loss_coefficients: List[float] = [1.0, 1.0, 1.0, 1.0],
         optim_lr: float = 1e-4,
         optim_type: str = "adamw",
     ) -> None:
@@ -45,13 +50,11 @@ class HMT_GRN(pl.LightningModule):
         assert (
             emb_switch[0] and emb_switch[1]
         ), "User embeddings and POI embeddings must be used and can't be turned off!"
-        
-        
+
         self.hierarchical_spatial_graph = dataset.hierarchical_spatial_graph
         self.register_buffer("temporal_graph", dataset.temporal_graph)
         self.register_buffer("spatial_graph", dataset.spatial_graph)
-        
-        
+
         self.poi_trajectories = dataset.poi_trajectories
 
         self.num_users = dataset.STATS["num_user"] + 1  # index 0 is padding
@@ -63,11 +66,11 @@ class HMT_GRN(pl.LightningModule):
             dataset.STATS[f"num_gh_P{precision}"] + 1  # index 0 is padding
             for precision in self.geohash_precision
         ]
-        
-        assert (
-            len(task_loss_coefficients) - 1 == len(self.geohash_precision)
+
+        assert len(task_loss_coefficients) - 1 == len(
+            self.geohash_precision
         ), "You should provide one coefficient for next POI prediction task and one for each next geohash prediction task."
-        
+
         self.task_loss_coefficients = task_loss_coefficients
 
         self.user_emb_dim = user_emb_dim
@@ -111,10 +114,14 @@ class HMT_GRN(pl.LightningModule):
             else None
         )
 
-        self.gh_embeddings = nn.ModuleList([
-            nn.Embedding(num_embeddings=num_gh, embedding_dim=gh_emb_dim, padding_idx=0)
-            for num_gh in self.num_ghs
-        ])
+        self.gh_embeddings = nn.ModuleList(
+            [
+                nn.Embedding(
+                    num_embeddings=num_gh, embedding_dim=gh_emb_dim, padding_idx=0
+                )
+                for num_gh in self.num_ghs
+            ]
+        )
 
         self.emb_dropout = nn.Dropout(p=emb_dropout)
 
@@ -124,7 +131,7 @@ class HMT_GRN(pl.LightningModule):
             heads=num_GAT_heads,
             concat=False,
             dropout=GAT_dropout,
-            add_self_loops=False
+            add_self_loops=False,
         )
         self.spatialGAT = tgnn.GATConv(
             poi_emb_dim,
@@ -132,11 +139,11 @@ class HMT_GRN(pl.LightningModule):
             heads=num_GAT_heads,
             concat=False,
             dropout=GAT_dropout,
-            add_self_loops=False
+            add_self_loops=False,
         )
-        
+
         self.attended_poi_projector = nn.Linear(
-            in_features=3*poi_emb_dim, out_features=poi_emb_dim
+            in_features=3 * poi_emb_dim, out_features=poi_emb_dim
         )
 
         self.net = nn.LSTM(
@@ -150,10 +157,12 @@ class HMT_GRN(pl.LightningModule):
         self.poi_final_projector = nn.Linear(
             in_features=hidden_dim, out_features=self.num_pois
         )
-        self.geohash_projectors = nn.ModuleList([
-            nn.Linear(in_features=hidden_dim + gh_emb_dim, out_features=num_gh)
-            for num_gh in self.num_ghs
-        ])
+        self.geohash_projectors = nn.ModuleList(
+            [
+                nn.Linear(in_features=hidden_dim + gh_emb_dim, out_features=num_gh)
+                for num_gh in self.num_ghs
+            ]
+        )
 
         # This single loss function is applicable to all tasks since the padding index for all
         # embeddings are 0.
@@ -212,80 +221,127 @@ class HMT_GRN(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
 
-        
         # Extract the neighbors of the nodes in the batch from spatial and temporal graphs
         # The resulting tensors have shape: (batch, seq_len, num_pois)
         # The third dimension contains binary vector representing neighbors IDs.
         pois_spatial_neighbors = self.spatial_graph[pois]
         pois_temporal_neighbors = self.temporal_graph[pois]
-        
+
         # We create two new tensors to store the spatially and temporally attended POI embeddings
-        spatially_attended_poi_embs = torch.zeros_like(poi_embs, dtype=poi_embs.dtype, device=poi_embs.device)
-        temporally_attended_poi_embs = torch.zeros_like(poi_embs, dtype=poi_embs.dtype, device=poi_embs.device)
+        spatially_attended_poi_embs = torch.zeros_like(
+            poi_embs, dtype=poi_embs.dtype, device=poi_embs.device
+        )
+        temporally_attended_poi_embs = torch.zeros_like(
+            poi_embs, dtype=poi_embs.dtype, device=poi_embs.device
+        )
         for batch_index in range(batch_size):
             for seq_index in range(seq_len):
                 POI = pois[batch_index, seq_index]
                 POI_emb = poi_embs[batch_index, seq_index]
-                if POI != 0: # skip padding tokens
-                    POI_sp_nbs = torch.nonzero(pois_spatial_neighbors[batch_index, seq_index]).squeeze(1) # shape (num_neighbors)
-                    POI_tmp_nbs = torch.nonzero(pois_temporal_neighbors[batch_index, seq_index]).squeeze(1) # shape (num_neighbors)
+                if POI != 0:  # skip padding tokens
+                    POI_sp_nbs = torch.nonzero(
+                        pois_spatial_neighbors[batch_index, seq_index]
+                    ).squeeze(
+                        1
+                    )  # shape (num_neighbors)
+                    POI_tmp_nbs = torch.nonzero(
+                        pois_temporal_neighbors[batch_index, seq_index]
+                    ).squeeze(
+                        1
+                    )  # shape (num_neighbors)
                     POI_sp_nbs_embs = self.poi_emb(POI_sp_nbs)
                     POI_tmp_nbs_embs = self.poi_emb(POI_tmp_nbs)
-                    
+
                     # POI_sp_nbs_embs = self.emb_dropout(POI_sp_nbs_embs)
                     # POI_tmp_nbs_embs = self.emb_dropout(POI_tmp_nbs_embs)
-                    
-                    POI_sp_nbs_embs = torch.cat([POI_emb.unsqueeze(0), POI_sp_nbs_embs], dim=0) # shape (num_neighbors+1)
-                    POI_tmp_nbs_embs = torch.cat([POI_emb.unsqueeze(0), POI_tmp_nbs_embs], dim=0) # shape (num_neighbors+1)
-                    
+
+                    POI_sp_nbs_embs = torch.cat(
+                        [POI_emb.unsqueeze(0), POI_sp_nbs_embs], dim=0
+                    )  # shape (num_neighbors+1)
+                    POI_tmp_nbs_embs = torch.cat(
+                        [POI_emb.unsqueeze(0), POI_tmp_nbs_embs], dim=0
+                    )  # shape (num_neighbors+1)
+
                     # Cunstruct the COO format edge indecies for GATConv input
-                    spatial_edge_index = torch.stack([
-                        torch.zeros(len(POI_sp_nbs), dtype=torch.long),  # POI -> neighbors
-                        torch.arange(1, len(POI_sp_nbs) + 1, dtype=torch.long)  # neighbors -> POI
-                    ], dim=0).to(POI.device)
-                    
+                    spatial_edge_index = torch.stack(
+                        [
+                            torch.zeros(
+                                len(POI_sp_nbs), dtype=torch.long
+                            ),  # POI -> neighbors
+                            torch.arange(
+                                1, len(POI_sp_nbs) + 1, dtype=torch.long
+                            ),  # neighbors -> POI
+                        ],
+                        dim=0,
+                    ).to(POI.device)
+
                     # Since the graph is undirected we have to add edges from neighbors to POI
                     sp_reversed_edges = spatial_edge_index.flip(0)
-                    spatial_edge_index = torch.cat([spatial_edge_index, sp_reversed_edges], dim=1)
+                    spatial_edge_index = torch.cat(
+                        [spatial_edge_index, sp_reversed_edges], dim=1
+                    )
                     # Add self-loop for POI
-                    spatial_edge_index = torch.cat([torch.tensor([[0], [0]]).to(POI.device), spatial_edge_index], dim=1)
-                    
-                    temporal_edge_index = torch.stack([
-                        torch.zeros(len(POI_tmp_nbs), dtype=torch.long),  # POI -> neighbors
-                        torch.arange(1, len(POI_tmp_nbs) + 1, dtype=torch.long)  # neighbors -> POI
-                    ], dim=0).to(POI.device)
-                    
+                    spatial_edge_index = torch.cat(
+                        [torch.tensor([[0], [0]]).to(POI.device), spatial_edge_index],
+                        dim=1,
+                    )
+
+                    temporal_edge_index = torch.stack(
+                        [
+                            torch.zeros(
+                                len(POI_tmp_nbs), dtype=torch.long
+                            ),  # POI -> neighbors
+                            torch.arange(
+                                1, len(POI_tmp_nbs) + 1, dtype=torch.long
+                            ),  # neighbors -> POI
+                        ],
+                        dim=0,
+                    ).to(POI.device)
+
                     tp_reversed_edges = temporal_edge_index.flip(0)
-                    temporal_edge_index = torch.cat([temporal_edge_index, tp_reversed_edges], dim=1)
-                    temporal_edge_index = torch.cat([torch.tensor([[0], [0]]).to(POI.device), temporal_edge_index], dim=1)
-                    
-                    POI_spatialy_attended = self.spatialGAT(POI_sp_nbs_embs, spatial_edge_index)[0].squeeze()
-                    POI_temporally_attended = self.temporalGAT(POI_tmp_nbs_embs, temporal_edge_index)[0].squeeze()
-                    
-                    spatially_attended_poi_embs[batch_index, seq_index] = POI_spatialy_attended
-                    temporally_attended_poi_embs[batch_index, seq_index] = POI_temporally_attended
+                    temporal_edge_index = torch.cat(
+                        [temporal_edge_index, tp_reversed_edges], dim=1
+                    )
+                    temporal_edge_index = torch.cat(
+                        [torch.tensor([[0], [0]]).to(POI.device), temporal_edge_index],
+                        dim=1,
+                    )
+
+                    POI_spatialy_attended = self.spatialGAT(
+                        POI_sp_nbs_embs, spatial_edge_index
+                    )[0].squeeze()
+                    POI_temporally_attended = self.temporalGAT(
+                        POI_tmp_nbs_embs, temporal_edge_index
+                    )[0].squeeze()
+
+                    spatially_attended_poi_embs[batch_index, seq_index] = (
+                        POI_spatialy_attended
+                    )
+                    temporally_attended_poi_embs[batch_index, seq_index] = (
+                        POI_temporally_attended
+                    )
                 else:
                     spatially_attended_poi_embs[batch_index, seq_index] = POI_emb
                     temporally_attended_poi_embs[batch_index, seq_index] = POI_emb
 
-        
         final_poi_emb = self.attended_poi_projector(
-            torch.cat([poi_embs, spatially_attended_poi_embs, temporally_attended_poi_embs], dim=-1)
+            torch.cat(
+                [poi_embs, spatially_attended_poi_embs, temporally_attended_poi_embs],
+                dim=-1,
+            )
         )
-                    
+
         lstm_inputs = torch.cat(
             [final_poi_emb, user_embs], dim=-1
         )  # shape (batch, seq_len, poi_emb_dim + user_emb_dim)
         if poi_cat_embs:
             # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim)
-            lstm_inputs = torch.cat([lstm_inputs, poi_cat_embs], dim=-1) 
+            lstm_inputs = torch.cat([lstm_inputs, poi_cat_embs], dim=-1)
         if ts_embs:
             # shape (batch, seq_len, poi_emb_dim + user_emb_dim + poi_cat_emb_dim + ts_emb_dim)
-            lstm_inputs = torch.cat([lstm_inputs, ts_embs], dim=-1) 
+            lstm_inputs = torch.cat([lstm_inputs, ts_embs], dim=-1)
 
         lstm_inputs = self.emb_dropout(lstm_inputs)
-                
-            
 
         pck_inputs = pack_padded_sequence(
             lstm_inputs,
@@ -301,16 +357,13 @@ class HMT_GRN(pl.LightningModule):
         )  # shape (batch, seq_len, hidden_dim)
 
         poi_logits = self.poi_final_projector(lstm_out)
-        
-        gh_embs = [
-            self.emb_dropout(gh_emb) for gh_emb in gh_embs
-        ]
-        
+
+        gh_embs = [self.emb_dropout(gh_emb) for gh_emb in gh_embs]
+
         ghs_logits = [
             self.geohash_projectors[idx](torch.cat([lstm_out, gh_embs[idx]], dim=-1))
-            for idx in range(len(self.geohash_precision)) 
+            for idx in range(len(self.geohash_precision))
         ]
-        
 
         return poi_logits, ghs_logits
 
@@ -369,26 +422,40 @@ class HMT_GRN(pl.LightningModule):
         ]
 
         poi_loss = self.loss_fn(poi_logits, tgt_pois.reshape(-1))
-        
+
         tgt_ghs = [tgt_gh1, tgt_gh2, tgt_gh3]
         gh_losses = [
             self.loss_fn(ghs_logits[idx], tgt_ghs[idx].reshape(-1))
             for idx in range(len(self.geohash_precision))
         ]
-        
+
         poi_loss_weighted = poi_loss * self.task_loss_coefficients[0]
         gh_losses_weighted = [
             gh_losses[idx] * self.task_loss_coefficients[idx + 1]
             for idx in range(len(self.geohash_precision))
         ]
-        
+
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
-        
-        self.log("Train/Total Loss", total_loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Train/POI Loss", poi_loss, on_epoch=True, reduce_fx="mean", prog_bar=False)
+
+        self.log(
+            "Train/Total Loss",
+            total_loss,
+            on_epoch=True,
+            reduce_fx="mean",
+            prog_bar=True,
+        )
+        self.log(
+            "Train/POI Loss", poi_loss, on_epoch=True, reduce_fx="mean", prog_bar=False
+        )
         for idx in range(len(self.geohash_precision)):
-            self.log(f"Train/Geohash P{self.geohash_precision[idx]} Loss", gh_losses[idx], on_epoch=True, reduce_fx="mean", prog_bar=False) 
-        
+            self.log(
+                f"Train/Geohash P{self.geohash_precision[idx]} Loss",
+                gh_losses[idx],
+                on_epoch=True,
+                reduce_fx="mean",
+                prog_bar=False,
+            )
+
         return total_loss / 4
 
         # self.log("Train/Loss", loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
@@ -434,7 +501,7 @@ class HMT_GRN(pl.LightningModule):
         batch_size = pois.size(0)
         seq_len = pois.size(1)
         device = users.device
-        
+
         # This mask contains 1 in places that the sequences does not contain pad token
         mask = torch.arange(seq_len, device=device).expand(
             len(orig_lengths), seq_len
@@ -447,7 +514,7 @@ class HMT_GRN(pl.LightningModule):
         poi_logits, ghs_logits = self.forward(
             users, pois, pois_cat, [gh1, gh2, gh3], ts, ut, orig_lengths, mask
         )
-        
+
         # poi_logits = poi_logits.view(-1, self.num_pois)
         # ghs_logits = [
         #     ghs_logits[idx].view(-1, self.num_ghs[idx])
@@ -457,39 +524,41 @@ class HMT_GRN(pl.LightningModule):
         # For prediction we only use the logits related to the last prediction of the model
         last_valid_indices = orig_lengths - 1
         batch_indices = torch.arange(batch_size, device=device)
-        
+
         last_poi_logits = poi_logits[
             batch_indices, last_valid_indices, :
         ]  # shape (batch, num_poi)
-        
+
         last_ghs_logits = [
             ghs_logits[idx][batch_indices, last_valid_indices, :]
             for idx in range(len(self.geohash_precision))
-        ] # shape (num_geohash_precisions, (batch, num_gh@P))
-        
+        ]  # shape (num_geohash_precisions, (batch, num_gh@P))
+
         last_poi_logits = last_poi_logits.view(-1, self.num_pois)
         last_ghs_logits = [
             last_ghs_logits[idx].view(-1, self.num_ghs[idx])
             for idx in range(len(self.geohash_precision))
         ]
-        
-        tgt_pois = tgt_pois[:, 0] # take the first POI in the test check-ins, shape (batch)
+
+        tgt_pois = tgt_pois[
+            :, 0
+        ]  # take the first POI in the test check-ins, shape (batch)
         tgt_ghs = [
             tgt_gh[:, 0] for tgt_gh in [tgt_gh1, tgt_gh2, tgt_gh3] if tgt_gh is not None
-        ] # take the first Geohash in the test check-ins for each precision, shape (batch)
+        ]  # take the first Geohash in the test check-ins for each precision, shape (batch)
 
         poi_loss = self.loss_fn(last_poi_logits, tgt_pois.reshape(-1))
         gh_losses = [
             self.loss_fn(last_ghs_logits[idx], tgt_ghs[idx].reshape(-1))
             for idx in range(len(self.geohash_precision))
         ]
-        
+
         poi_loss_weighted = poi_loss * self.task_loss_coefficients[0]
         gh_losses_weighted = [
             gh_losses[idx] * self.task_loss_coefficients[idx + 1]
             for idx in range(len(self.geohash_precision))
         ]
-        
+
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
 
         acc1 = self.acc1(last_poi_logits, tgt_pois)
@@ -497,18 +566,28 @@ class HMT_GRN(pl.LightningModule):
         acc10 = self.acc10(last_poi_logits, tgt_pois)
         acc20 = self.acc20(last_poi_logits, tgt_pois)
         mrr = self.mrr(last_poi_logits, tgt_pois)
-        
-        self.log("Val/Total Loss", total_loss, on_epoch=True, reduce_fx="mean", prog_bar=True)
-        self.log("Val/POI Loss", poi_loss, on_epoch=True, reduce_fx="mean", prog_bar=False)
+
+        self.log(
+            "Val/Total Loss", total_loss, on_epoch=True, reduce_fx="mean", prog_bar=True
+        )
+        self.log(
+            "Val/POI Loss", poi_loss, on_epoch=True, reduce_fx="mean", prog_bar=False
+        )
         for idx in range(len(self.geohash_precision)):
-            self.log(f"Val/Geohash P{self.geohash_precision[idx]} Loss", gh_losses[idx], on_epoch=True, reduce_fx="mean", prog_bar=False)
-        
+            self.log(
+                f"Val/Geohash P{self.geohash_precision[idx]} Loss",
+                gh_losses[idx],
+                on_epoch=True,
+                reduce_fx="mean",
+                prog_bar=False,
+            )
+
         self.log("Val/Acc@1", acc1, on_epoch=True, reduce_fx="mean", prog_bar=False)
         self.log("Val/Acc@5", acc5, on_epoch=True, reduce_fx="mean", prog_bar=False)
         self.log("Val/Acc@10", acc10, on_epoch=True, reduce_fx="mean", prog_bar=False)
         self.log("Val/Acc@20", acc20, on_epoch=True, reduce_fx="mean", prog_bar=False)
         self.log("Val/MRR", mrr, on_epoch=True, reduce_fx="mean", prog_bar=False)
-        
+
         return total_loss / 4
 
     def test_step(self, batch, batch_idx): ...
@@ -522,6 +601,3 @@ class HMT_GRN(pl.LightningModule):
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
         return optimizer
-
-
-

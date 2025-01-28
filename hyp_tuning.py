@@ -16,30 +16,25 @@ from pathlib import Path
 from functools import partial
 
 HYP_SEARCH_SPACE = {
-    "user_emb_dim": tune.choice([128, 256]),
-    "poi_emb_dim": tune.choice([256, 512]),
-    "poi_cat_emb_dim": tune.choice([128]),
+    "user_emb_dim": tune.choice([256, 512]),
+    "poi_emb_dim": tune.choice([512, 768]),
     "gh_emb_dim": tune.choice([128, 256]),
-    "ts_emb_dim": tune.choice([128]),
-    "hidden_dim": tune.choice([256, 512]),
+    "ts_emb_dim": tune.choice([128, 256]),
+    "hidden_dim": tune.choice([512, 768, 1024]),
     "emb_switch": tune.choice([
-        [True, True, True, True],
-        [True, True, True, False],
+        # [True, True, True, True],
+        # [True, True, True, False],
         [True, True, False, True],
-        [True, True, False, False]
+        # [True, True, False, False]
     ]),
-    "num_lstm_layers": tune.choice([1, 2]),
-    "lstm_dropout": tune.choice([0.0, 0.5]),
-    "emb_dropout": tune.choice([0.0, 0.5, 0.9]),
+    "emb_dropout": tune.choice([0.9]),
     "GAT_dropout": tune.choice([0.0, 0.5]),
     "task_loss_coefficients": tune.choice([
         [1., 1., 1., 1.],
-        [1., 0.5, 0.5, 0.5],
         [1., 0., 0. , 0.],
         [1., 0., 0.5, 0]
     ]),
     "optim_lr": tune.loguniform(1e-5, 5e-4),
-    "optim_type": tune.choice(['adam', 'adamw'])
 }
 
 
@@ -75,10 +70,6 @@ if __name__ == "__main__":
     
     dataset = FoursquareNYC(
         batch_size=8,
-        spatial_graph_self_loop=True,
-        temporal_graph_self_loop=True,
-        temporal_graph_jaccard_mult_set=False,
-        temporal_graph_jaccard_sim_tsh=0.5,
     )
     dataset.setup('fit')
     dataset.setup('test')
@@ -86,7 +77,7 @@ if __name__ == "__main__":
     scheduler = ModifiedASHAScheduler(
         metric="loss",
         mode="min",
-        max_t=6,
+        max_t=10,
         grace_period=1,
         reduction_factor=2,
         )
