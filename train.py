@@ -20,7 +20,7 @@ import yaml
 from pathlib import Path
 
 from src.dataset import FoursquareNYC
-from src.models import TrajLSTM, HMT_GRN_V2, HMT_GRN_V3
+from src.models import TrajLSTM, HMT_GRN_V2
 
 
 if __name__ == "__main__":
@@ -99,7 +99,7 @@ if __name__ == "__main__":
             temporal_graph_jaccard_mult_set=False,
             temporal_graph_jaccard_sim_tsh=0.5,
         )
-        model = HMT_GRN_V3(ds)
+        model = HMT_GRN_V2(ds)
         tb_logger = TensorBoardLogger(log_dir, name="HMT-GRN")
 
         trainer = Trainer(
