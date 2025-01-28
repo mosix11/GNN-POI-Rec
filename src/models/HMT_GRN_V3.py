@@ -37,8 +37,8 @@ class HMT_GRN_V3(pl.LightningModule):
         emb_dropout: float = 0.9,
         num_GAT_heads: int = 4,
         GAT_dropout: float = 0.5,
-        # task_loss_coefficients: List[float] = [1., 1., 1., 1.],
-        task_loss_coefficients: List[float] = [1., 0., 0.5, 0.],
+        task_loss_coefficients: List[float] = [1., 1., 1., 1.],
+        # task_loss_coefficients: List[float] = [1., 0., 0.5, 0.],
         optim_lr: float = 0.0001,
         optim_type: str = "adamw",
     ) -> None:
