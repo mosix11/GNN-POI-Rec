@@ -14,7 +14,7 @@ from ..utils import misc_utils
 
 class TrajLSTM(pl.LightningModule):
     """
-    Baseline model for processing trajectories of user check-ins and 
+    Baseline model for processing trajectories of user check-ins and
     producing a probablity over next POI using a simple LSTM.
     """
 
@@ -128,7 +128,7 @@ class TrajLSTM(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """
         Training step logic.
-        
+
         Batch contains x, y, original lengths,
         where x and y contain (in order):
             [User ID, POIs, POIs Category, POIs Geohashes, POIs Time Slot, POIs Unix Timestamp]
@@ -184,7 +184,7 @@ class TrajLSTM(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """
         Validation step logic.
-        
+
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
@@ -235,7 +235,7 @@ class TrajLSTM(pl.LightningModule):
 
         tgt_poi_logits = tgt_poi_logits.view(-1, self.num_pois)
         # The target is the first check-in in the test check-ins.
-        tgt_pois = tgt_pois[:,0].reshape(-1)  # shape (batch, 1, num_poi)
+        tgt_pois = tgt_pois[:, 0].reshape(-1)  # shape (batch, 1, num_poi)
 
         poi_loss = self.loss_fn(tgt_poi_logits, tgt_pois.reshape(-1))
 
@@ -288,7 +288,7 @@ class TrajLSTM(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         """
         Test phase logic.
-        
+
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
@@ -322,7 +322,7 @@ class TrajLSTM(pl.LightningModule):
             user_ids, pois, orig_lengths
         )  # shape (batch, seq_len, num_poi)
 
-        # For prediction we only use the logits related to the test visits which start 
+        # For prediction we only use the logits related to the test visits which start
         # from the logits produced for the last training sample at index `last_train_indices`
         # to `orig_lengths - 1` or simply `last_train_indices:orig_lengths`
         last_train_indices = orig_lengths - target_seq_len
@@ -339,7 +339,6 @@ class TrajLSTM(pl.LightningModule):
         tgt_pois = tgt_pois.reshape(-1)
 
         poi_loss = self.loss_fn(tgt_poi_logits, tgt_pois.reshape(-1))
-
 
         acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
         acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
@@ -373,9 +372,9 @@ class TrajLSTM(pl.LightningModule):
             ["Acc@20", self.acc20_avg.avg],
             ["MRR", self.mrr_avg.avg],
         ]
-        print('\n\n')
+        print("\n\n")
         print(tabulate(table, headers, tablefmt="rounded_grid"))
-        print('\n\n')
+        print("\n\n")
         return super().on_test_epoch_end()
 
     def configure_optimizers(self):
@@ -389,11 +388,12 @@ class TrajLSTM(pl.LightningModule):
             optimizer = torch.optim.AdamW(self.parameters(), lr=self.optim_lr)
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
-            
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, mode='min', patience=10)
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': scheduler,
-            'monitor': "Val/Loss"
-        }
 
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, factor=0.5, mode="min", patience=10
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler,
+            "monitor": "Val/Loss",
+        }

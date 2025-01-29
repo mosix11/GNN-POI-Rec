@@ -20,7 +20,7 @@ model:
   poi_cat_emb_dim: 128
   gh_emb_dim: 128
   ts_emb_dim: 128
-  hidden_dim: 512
+  hidden_dim: 768
   emb_switch: [True, True, False, True]
   num_lstm_layers: 1
   lstm_dropout: 0.0

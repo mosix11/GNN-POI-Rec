@@ -191,7 +191,7 @@ class HMT_GRN_V2(pl.LightningModule):
         )
 
         # This layer will project the concatenated original POI embedding
-        # and spatially and temporally attended POI embeddings to the 
+        # and spatially and temporally attended POI embeddings to the
         # initial POI embedding dimension to be passed to LSTM.
         self.attended_poi_projector = nn.Linear(
             in_features=3 * poi_emb_dim, out_features=poi_emb_dim
@@ -348,7 +348,7 @@ class HMT_GRN_V2(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         """
         Training step logic.
-        
+
         Batch contains x, y, original lengths,
         where x and y contain (in order):
             [User ID, POIs, POIs Category, POIs Geohashes, POIs Time Slot, POIs Unix Timestamp]
@@ -452,7 +452,7 @@ class HMT_GRN_V2(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         """
         Validation step logic.
-        
+
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
@@ -564,9 +564,9 @@ class HMT_GRN_V2(pl.LightningModule):
         acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
         mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
 
-        self.poi_loss_avg.update(poi_loss)
+        self.poi_loss_avg.update(poi_loss.detach().cpu().item())
         for idx, gh_loss in enumerate(gh_losses):
-            self.geohash_losses_avg[idx].update(gh_loss)
+            self.geohash_losses_avg[idx].update(gh_loss.detach().cpu().item())
         self.acc1_avg.update(acc1_val.detach().cpu().item())
         self.acc5_avg.update(acc5_val.detach().cpu().item())
         self.acc10_avg.update(acc10_val.detach().cpu().item())
@@ -619,7 +619,7 @@ class HMT_GRN_V2(pl.LightningModule):
     def test_step(self, batch, batch_idx):
         """
         Test phase logic.
-        
+
         Batch contains x, y, original lengths,
         where x contians (in order):
             [User ID, POIs, POIs Category, POIs Geohash, POIs Time Slot, POIs Unix Timestamp]
@@ -768,7 +768,7 @@ class HMT_GRN_V2(pl.LightningModule):
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.5, mode="min", patience=10
+            optimizer, factor=0.5, mode="min", patience=5
         )
         return {
             "optimizer": optimizer,

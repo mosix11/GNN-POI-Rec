@@ -102,7 +102,7 @@ if __name__ == "__main__":
             strategy="auto",
             callbacks=[
                 EarlyStopping(
-                    monitor="Val/Loss", patience=25, min_delta=0.001, mode="min"
+                    monitor="Val/Loss", patience=10, min_delta=0.001, mode="min"
                 ),
             ],
         )

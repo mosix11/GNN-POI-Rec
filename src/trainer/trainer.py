@@ -90,7 +90,7 @@ class CustomTrainer:
         self.use_amp = use_amp
         self.setup_data_loaders(dataset)
         self.prepare_model(model)
-        self.optim = self.model.configure_optimizers()
+        self.optim = self.model.configure_optimizers()["optimizer"]
 
         if checkpoint:
             self.model.load_state_dict(checkpoint["model_state"])
@@ -175,12 +175,12 @@ class CustomTrainer:
             if self.ray_tuner:
                 self.ray_tuner.report(
                     {
-                        "loss": poi_val_loss.detach().cpu().item(),
-                        "ACC@1": acc1_val.detach().cpu().item(),
-                        "ACC@5": acc5_val.detach().cpu().item(),
-                        "ACC@10": acc10_val.detach().cpu().item(),
-                        "ACC@20": acc20_val.detach().cpu().item(),
-                        "MRR": mrr_val.detach().cpu().item(),
+                        "loss": poi_val_loss,
+                        "ACC@1": acc1_val,
+                        "ACC@5": acc5_val,
+                        "ACC@10": acc10_val,
+                        "ACC@20": acc20_val,
+                        "MRR": mrr_val,
                     },
                     # checkpoint=checkpoint
                 )
