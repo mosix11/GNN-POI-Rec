@@ -390,7 +390,7 @@ class TrajLSTM(pl.LightningModule):
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
 
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.5, mode="min", patience=5
+            optimizer, factor=0.5, mode="min", patience=4
         )
         return {
             "optimizer": optimizer,

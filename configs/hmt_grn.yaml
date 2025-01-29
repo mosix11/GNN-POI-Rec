@@ -6,7 +6,7 @@ dataset:
   num_test_checkins: 6
   geohash_precision: [5, 6, 7]
   max_traj_length: 64
-  traj_sampling_method: "window"
+  traj_sampling_method: 'window'
   temporal_graph_jaccard_mult_set: False
   temporal_graph_jaccard_sim_tsh: 0.5
   spatial_graph_self_loop: True
@@ -29,4 +29,4 @@ model:
   GAT_dropout: 0.5
   task_loss_coefficients: [1., 1., 1., 1.]
   optim_lr: 1.0e-4
-  optim_type: "adamw"
+  optim_type: 'adamw'

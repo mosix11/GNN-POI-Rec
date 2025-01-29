@@ -774,7 +774,7 @@ class HMT_GRN_V2(pl.LightningModule):
         elif self.optim_type == "adam":
             optimizer = torch.optim.Adam(self.parameters(), lr=self.optim_lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.5, mode="min", patience=5
+            optimizer, factor=0.5, mode="min", patience=4
         )
         return {
             "optimizer": optimizer,

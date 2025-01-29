@@ -115,7 +115,7 @@ if __name__ == "__main__":
     tuner = tune.Tuner(
         trainable=tune.with_resources(
             tune.with_parameters(objective, dataset=dataset, outputs_dir=outputs_dir),
-            resources={"cpu": 4, "gpu": 1},
+            resources={"cpu": 2, "gpu": 1},
         ),
         tune_config=tune.TuneConfig(
             scheduler=scheduler,
