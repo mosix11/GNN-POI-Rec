@@ -28,7 +28,7 @@ HYP_SEARCH_SPACE = {
             # [True, True, True, True],
             # [True, True, True, False],
             [True, True, False, True],
-            [True, True, False, False]
+            [True, True, False, False],
         ]
     ),
     "emb_dropout": tune.choice([0.9]),
@@ -38,7 +38,7 @@ HYP_SEARCH_SPACE = {
             [1.0, 1.0, 1.0, 1.0],
             [1.0, 0.0, 0.0, 0.0],
             [1.0, 0.0, 0.5, 0],
-            [1.0, 0.0, 1., 0],
+            [1.0, 0.0, 1.0, 0],
         ]
     ),
     "optim_lr": tune.loguniform(1e-5, 5e-4),

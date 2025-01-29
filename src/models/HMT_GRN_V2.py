@@ -103,8 +103,6 @@ class HMT_GRN_V2(pl.LightningModule):
             dataset.get_temporal_graph_edge_indices(self_loop=True)[0],
         )
 
-        self.poi_trajectories = dataset.poi_trajectories
-
         self.num_users = dataset.STATS["num_user"] + 1  # index 0 is padding
         self.num_pois = dataset.STATS["num_pois"] + 1  # index 0 is padding
         self.num_poi_cat = dataset.STATS["num_poi_cat"] + 1  # index 0 is padding
@@ -274,6 +272,7 @@ class HMT_GRN_V2(pl.LightningModule):
 
         user_embs = self.user_emb(users)
 
+        # embed data if their switch is on
         poi_cat_embs = self.poi_cat_emb(pois_cat) if self.emb_switch[2] else None
         ts_embs = self.ts_emb(ts) if self.emb_switch[3] else None
         gh_embs = [
@@ -398,12 +397,14 @@ class HMT_GRN_V2(pl.LightningModule):
             users, pois, pois_cat, [gh1, gh2, gh3], ts, ut, orig_lengths, mask
         )
 
+        # reshape logits
         poi_logits = poi_logits.view(-1, self.num_pois)
         ghs_logits = [
             ghs_logits[idx].view(-1, self.num_ghs[idx])
             for idx in range(len(self.geohash_precision))
         ]
 
+        # calculate multitask losses
         poi_loss = self.loss_fn(poi_logits, tgt_pois.reshape(-1))
 
         tgt_ghs = [tgt_gh1, tgt_gh2, tgt_gh3]
@@ -412,14 +413,17 @@ class HMT_GRN_V2(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
 
+        # weight losses by their coefficients
         poi_loss_weighted = poi_loss * self.task_loss_coefficients[0]
         gh_losses_weighted = [
             gh_losses[idx] * self.task_loss_coefficients[idx + 1]
             for idx in range(len(self.geohash_precision))
         ]
 
+        # sum weighted losses
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
 
+        # update moving averages
         self.poi_loss_avg.update(poi_loss.detach().cpu().item())
         for idx, gh_loss in enumerate(gh_losses):
             self.geohash_losses_avg[idx].update(gh_loss.detach().cpu().item())
@@ -550,12 +554,14 @@ class HMT_GRN_V2(pl.LightningModule):
             for idx in range(len(self.geohash_precision))
         ]
 
+        # weight losses by their coefficients
         poi_loss_weighted = poi_loss * self.task_loss_coefficients[0]
         gh_losses_weighted = [
             gh_losses[idx] * self.task_loss_coefficients[idx + 1]
             for idx in range(len(self.geohash_precision))
         ]
 
+        # sum weighted losses
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
 
         acc1_val = self.acc1(tgt_poi_logits, tgt_pois)

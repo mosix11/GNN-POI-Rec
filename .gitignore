@@ -3,7 +3,7 @@ ckp_path.absolute()# Project Specific Files
 data/
 runs/
 weights/
-# raytune/
+raytune/
 outputs/
 output/
 backups/
