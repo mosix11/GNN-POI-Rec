@@ -1,6 +1,6 @@
 # Next POI Recommendation Using Spatio-Temporal GNN
 
-This repository contains the implementation of the Hierarchical Multitask Graph Recurrent Network proposed in the paper [Hierarchical Multi-Task Graph Recurrent Network for Next POI Recommendation](https://dl.acm.org/doi/pdf/10.1145/3477495.3531989). The impelementaion slightly differs from the original method since I applied it to the smaller [Foursquare NYC](https://sites.google.com/site/yangdingqi/home/foursquare-dataset#h.p_ID_46) dataset. The method does not provide satisfactory performane on this dataset and only slightly outperforms a simple LSTM baseline model.
+This repository contains the implementation of the Hierarchical Multitask Graph Recurrent Network proposed in the paper [Hierarchical Multi-Task Graph Recurrent Network for Next POI Recommendation](https://dl.acm.org/doi/pdf/10.1145/3477495.3531989). The impelementaion slightly differs from the original method since I applied it to the smaller [Foursquare NYC](https://sites.google.com/site/yangdingqi/home/foursquare-dataset#h.p_ID_46) dataset. Also, this implementation uses operations that makes training a lot faster. The model significantly outperforms the baseline model which is a simple LSTM.
 
 ## Installation
 
@@ -57,6 +57,26 @@ In order to run hyperparameter search you can run:
 
 ```bash
 python hyp_tuning.py
+```
+
+## Performance
+
+The following table shows the performance of the model with the last 6 check-ins of each user being kept for test split.
+
+```plaintext
+╭──────────┬──────────╮
+│ Metric   │    Score │
+├──────────┼──────────┤
+│ Acc@1    │ 0.239583 │
+├──────────┼──────────┤
+│ Acc@5    │ 0.487132 │
+├──────────┼──────────┤
+│ Acc@10   │ 0.534467 │
+├──────────┼──────────┤
+│ Acc@20   │ 0.550398 │
+├──────────┼──────────┤
+│ MRR      │ 0.36405  │
+╰──────────┴──────────╯
 ```
 
 ## References
