@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 import geohash2 as geohash
 from typing import Union, List, Tuple
 from functools import partial
-
+from collections import defaultdict
 
 from ..utils import misc_utils
 
@@ -44,7 +44,7 @@ class FoursquareNYC(pl.LightningDataModule):
         self,
         data_dir: Path = Path("./data").absolute(),
         batch_size: int = 32,
-        num_workers: int = 8,
+        num_workers: int = 2,
         user_checkin_tsh: Tuple[int, int] = (20, np.inf),
         venue_checkin_tsh: Tuple[int, int] = (10, np.inf),
         num_test_checkins: int = 6,
@@ -334,30 +334,24 @@ class FoursquareNYC(pl.LightningDataModule):
 
         """
         df = self.poi_trajectories
-        graph = {}
 
-        for i in range(len(self.geohash_precision) - 1):
-            parnent_prc = self.geohash_precision[i]
-            child_prc = self.geohash_precision[i + 1]
+        def build_graph(df):
+            graph = defaultdict(set)
 
-            parent_col = f"Geohash P{parnent_prc} ID"
-            child_col = f"Geohash P{child_prc} ID"
+            for _, row in df.iterrows():
+                p5, p6, p7, venue = (
+                    row["Geohash P5 ID"],
+                    row["Geohash P6 ID"],
+                    row["Geohash P7 ID"],
+                    row["Venue ID"],
+                )
+                graph[f"P5-{p5}"].add(f"P6-{p6}")
+                graph[f"P6-{p6}"].add(f"P7-{p7}")
+                graph[f"P7-{p7}"].add(f"V-{venue}")
 
-            # Group children by their parent geohash
-            parent_to_children = (
-                df.groupby(parent_col)[child_col]
-                .apply(lambda x: list(x.unique()))
-                .to_dict()
-            )
-            graph[f"P{parnent_prc}_to_P{child_prc}"] = parent_to_children
+            return graph
 
-        # Map last precision geohashes to POIs
-        graph[f"P{self.geohash_precision[-1]}_to_POI"] = (
-            df.groupby(f"Geohash P{self.geohash_precision[-1]} ID")["Venue ID"]
-            .apply(lambda x: list(x.unique()))
-            .to_dict()
-        )
-
+        graph = build_graph(df)
         self.hierarchical_spatial_graph = graph
 
     def _preprocess_data(self):

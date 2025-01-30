@@ -48,7 +48,7 @@ class HMT_GRN_V2(pl.LightningModule):
         num_GAT_heads: int = 4,
         GAT_dropout: float = 0.5,
         task_loss_coefficients: List[float] = [1.0, 1.0, 1.0, 1.0],
-        # task_loss_coefficients: List[float] = [1., 0., 0.5, 0.],
+        hbm_beam_width: int = 30,
         optim_lr: float = 0.0001,
         optim_type: str = "adamw",
     ) -> None:
@@ -78,6 +78,7 @@ class HMT_GRN_V2(pl.LightningModule):
                 This vector is used to give different coefficients to losses.
                 The first index is for POI loss. The later indices for Geohash
                 corss entropy losses.
+            `hbm_beam_width` (int): Hierarchical beam search beam width.
             `optim_lr`: (float): Learning rate for the optimizer.
             `optim_type`: (str): Type of the optimizer. Between [`adam`, `adamw`].
         """
@@ -118,6 +119,7 @@ class HMT_GRN_V2(pl.LightningModule):
         ), "You should provide one coefficient for next POI prediction task and one for each next geohash prediction task."
 
         self.task_loss_coefficients = task_loss_coefficients
+        self.beam_width = hbm_beam_width
 
         self.user_emb_dim = user_emb_dim
         self.poi_emb_dim = poi_emb_dim
@@ -564,11 +566,33 @@ class HMT_GRN_V2(pl.LightningModule):
         # sum weighted losses
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
 
-        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
-        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
-        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
-        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
+        # acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
+        # acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
+        # acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
+        # acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
         mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
+
+        # do the HBM and find the top `beam_width` POIs
+        sorted_vens, sorted_probs = self.hierarchical_beam_search_batched(
+            tgt_ghs_logits[0],
+            tgt_ghs_logits[1],
+            tgt_ghs_logits[2],
+            tgt_poi_logits,
+            self.beam_width,
+        )
+
+        # Manually calculate the metrics
+        hits = sorted_vens[:, :20].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc20_val = hits.float().mean()
+
+        hits = sorted_vens[:, :10].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc10_val = hits.float().mean()
+
+        hits = sorted_vens[:, :5].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc5_val = hits.float().mean()
+
+        hits = sorted_vens[:, :1].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc1_val = hits.float().mean()
 
         self.poi_loss_avg.update(poi_loss.detach().cpu().item())
         for idx, gh_loss in enumerate(gh_losses):
@@ -579,7 +603,7 @@ class HMT_GRN_V2(pl.LightningModule):
         self.acc20_avg.update(acc20_val.detach().cpu().item())
         self.mrr_avg.update(mrr_val.detach().cpu().item())
 
-        self.log("Val/Loss", poi_loss, prog_bar=False, on_epoch=True, logger=True)
+        self.log("Val/Loss", poi_loss, prog_bar=False, on_epoch=True, logger=False)
 
         return total_loss / 4
 
@@ -723,11 +747,28 @@ class HMT_GRN_V2(pl.LightningModule):
 
         total_loss = poi_loss_weighted + sum(gh_losses_weighted)
 
-        acc1_val = self.acc1(tgt_poi_logits, tgt_pois)
-        acc5_val = self.acc5(tgt_poi_logits, tgt_pois)
-        acc10_val = self.acc10(tgt_poi_logits, tgt_pois)
-        acc20_val = self.acc20(tgt_poi_logits, tgt_pois)
         mrr_val = self.mrr(tgt_poi_logits, tgt_pois)
+
+        # do the HBM and find the most probable POIs
+        sorted_vens, sorted_probs = self.hierarchical_beam_search_batched(
+            tgt_ghs_logits[0],
+            tgt_ghs_logits[1],
+            tgt_ghs_logits[2],
+            tgt_poi_logits,
+            self.beam_width,
+        )
+        # calculate the metrics for POIs returned by HBM
+        hits = sorted_vens[:, :20].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc20_val = hits.float().mean()
+
+        hits = sorted_vens[:, :10].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc10_val = hits.float().mean()
+
+        hits = sorted_vens[:, :5].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc5_val = hits.float().mean()
+
+        hits = sorted_vens[:, :1].eq(tgt_pois.unsqueeze(1)).any(dim=-1)
+        acc1_val = hits.float().mean()
 
         self.poi_loss_avg.update(poi_loss)
         for idx, gh_loss in enumerate(gh_losses):
@@ -781,3 +822,128 @@ class HMT_GRN_V2(pl.LightningModule):
             "lr_scheduler": scheduler,
             "monitor": "Val/Loss",
         }
+
+    def hierarchical_beam_search_batched(
+        self, p5_probs, p6_probs, p7_probs, venue_probs, beam_width=20
+    ):
+        """
+        Performs hierarchical beam search over batched logits tensors.
+        This method uses the Hierarchical Spatial Graph to perform a
+        hierarchical beam search with the specified width.
+
+        Args:
+            `p5_probs`: (torch.Tensor): Logits for Geohash P5 IDs.
+            `p6_probs`: (torch.Tensor): Logits for Geohash P6 IDs.
+            `p7_probs`: (torch.Tensor): Logits for Geohash P7 IDs.
+            `venue_probs`: (torch.Tensor): Logits for Venue IDs.
+            `beam_width`: (int): Number of top elements to keep at each level.
+
+        Returns:
+        - torch.Tensor (batch_size, beam_width): Final sorted Venue IDs per batch.
+        - torch.Tensor (batch_size, beam_width): Final sorted logits per batch.
+        """
+
+        graph = self.hierarchical_spatial_graph
+        batch_size = p5_probs.shape[0]
+
+        # select top P5 IDs per batch
+        top_p5_probs, top_p5_ids = torch.topk(p5_probs, beam_width, dim=1)
+
+        # select top P6 IDs per batch from P5 parents
+        p6_candidates = []
+        for i in range(batch_size):
+            p6_ids = set()
+            for p5_id in top_p5_ids[i].tolist():
+                p6_ids.update(graph.get(f"P5-{p5_id}", []))
+
+            # convert to valid numerical indices
+            p6_indices = torch.tensor(
+                [
+                    int(p6[3:])
+                    for p6 in p6_ids
+                    if p6.startswith("P6-") and int(p6[3:]) < p6_probs.shape[1]
+                ],
+                device=p5_probs.device,
+            )
+
+            if len(p6_indices) == 0:
+                p6_indices = torch.tensor([0], device=p5_probs.device)  # Fallback
+
+            p6_probs_filtered = p6_probs[i, p6_indices]
+            p6_top_probs, p6_top_ids = torch.topk(
+                p6_probs_filtered, min(beam_width, len(p6_indices))
+            )
+            p6_candidates.append((p6_top_probs, p6_indices[p6_top_ids]))
+
+        # select top P7 IDs per batch from P6 parents
+        p7_candidates = []
+        for i in range(batch_size):
+            p7_ids = set()
+            for p6_id in p6_candidates[i][1].tolist():
+                p7_ids.update(graph.get(f"P6-{p6_id}", []))
+
+            # convert to valid numerical indices
+            p7_indices = torch.tensor(
+                [
+                    int(p7[3:])
+                    for p7 in p7_ids
+                    if p7.startswith("P7-") and int(p7[3:]) < p7_probs.shape[1]
+                ],
+                device=p6_probs.device,
+            )
+
+            if len(p7_indices) == 0:
+                p7_indices = torch.tensor([0], device=p6_probs.device)  # Fallback
+
+            p7_probs_filtered = p7_probs[i, p7_indices]
+            p7_top_probs, p7_top_ids = torch.topk(
+                p7_probs_filtered, min(beam_width, len(p7_indices))
+            )
+            p7_candidates.append((p7_top_probs, p7_indices[p7_top_ids]))
+
+        # select top Venue IDs per batch from P7 parents
+        venue_candidates = []
+        venue_prob_candidates = []
+        for i in range(batch_size):
+            venue_ids = set()
+            for p7_id in p7_candidates[i][1].tolist():
+                venue_ids.update(graph.get(f"P7-{p7_id}", []))
+
+            # convert to valid numerical indices
+            venue_indices = torch.tensor(
+                [
+                    int(v[2:])
+                    for v in venue_ids
+                    if v.startswith("V-") and int(v[2:]) < venue_probs.shape[1]
+                ],
+                device=p7_probs.device,
+            )
+
+            if len(venue_indices) == 0:
+                venue_indices = torch.tensor([0], device=p7_probs.device)  # Fallback
+
+            venue_probs_filtered = venue_probs[i, venue_indices]
+            venue_top_probs, venue_top_ids = torch.topk(
+                venue_probs_filtered, min(beam_width, len(venue_indices))
+            )
+
+            # compute cumulative logits
+            cumulative_probs = (
+                top_p5_probs[i][:, None]
+                * p6_candidates[i][0][:, None]
+                * p7_candidates[i][0][:, None]
+                * venue_top_probs[None, :]
+            ).flatten()
+
+            final_venue_ids = (
+                venue_indices[venue_top_ids].repeat(len(top_p5_probs[i]), 1).flatten()
+            )
+
+            # sort by logits
+            sorted_probs, sorted_indices = torch.sort(cumulative_probs, descending=True)
+            sorted_venue_ids = final_venue_ids[sorted_indices]
+
+            venue_candidates.append(sorted_venue_ids[:beam_width])
+            venue_prob_candidates.append(sorted_probs[:beam_width])
+
+        return torch.stack(venue_candidates), torch.stack(venue_prob_candidates)

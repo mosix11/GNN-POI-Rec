@@ -33,14 +33,7 @@ HYP_SEARCH_SPACE = {
     ),
     "emb_dropout": tune.choice([0.9]),
     "GAT_dropout": tune.choice([0.0, 0.5]),
-    "task_loss_coefficients": tune.choice(
-        [
-            [1.0, 1.0, 1.0, 1.0],
-            [1.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.5, 0],
-            [1.0, 0.0, 1.0, 0],
-        ]
-    ),
+    "task_loss_coefficients": tune.choice([[1.0, 1.0, 1.0, 1.0]]),
     "optim_lr": tune.loguniform(1e-5, 5e-4),
 }
 

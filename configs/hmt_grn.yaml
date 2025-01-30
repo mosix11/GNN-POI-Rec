@@ -28,5 +28,6 @@ model:
   num_GAT_heads: 4
   GAT_dropout: 0.5
   task_loss_coefficients: [1., 1., 1., 1.]
+  hbm_beam_width: 20
   optim_lr: 1.0e-4
   optim_type: 'adamw'
